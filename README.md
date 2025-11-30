@@ -19,32 +19,47 @@ Claude Code ←──stdio──→ MCP Server ←──WebSocket──→ Figma
 ## Quick Start
 
 ### Prerequisites
-- Node.js 18+ or Bun
+- Node.js 18+
 - Figma desktop app
-- Claude Code CLI
+- Claude Code CLI or Claude Desktop
 
 ### Installation
 
 #### Option A: Install from npm (recommended)
 
-1. **Add to Claude Code**
-   ```bash
-   claude mcp add figma-mcp-bridge -- npx @magic-spells/figma-mcp-bridge
-   ```
-   Or with Bun:
-   ```bash
-   claude mcp add figma-mcp-bridge -- bunx @magic-spells/figma-mcp-bridge
-   ```
+**For Claude Code CLI:**
+```bash
+claude mcp add figma-mcp-bridge -- npx @magic-spells/figma-mcp-bridge
+```
 
-2. **Install the Figma plugin**
-   - Download the `plugin` folder from this repo
-   - In Figma: **Plugins → Development → Import plugin from manifest**
-   - Select `plugin/manifest.json`
+**For Claude Desktop:**
 
-3. **Connect**
-   - Open a Figma file
-   - Run the plugin: **Plugins → Development → Claude Figma Bridge**
-   - The status should show "Connected"
+Edit your config file:
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "figma-mcp-bridge": {
+      "command": "npx",
+      "args": ["-y", "@magic-spells/figma-mcp-bridge"]
+    }
+  }
+}
+```
+
+Then restart Claude Desktop.
+
+**Install the Figma plugin:**
+- Download the `plugin` folder from this repo
+- In Figma: **Plugins → Development → Import plugin from manifest**
+- Select `plugin/manifest.json`
+
+**Connect:**
+- Open a Figma file
+- Run the plugin: **Plugins → Development → Claude Figma Bridge**
+- The status should show "Connected"
 
 #### Option B: Install from source
 
