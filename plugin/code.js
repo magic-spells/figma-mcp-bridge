@@ -163,6 +163,20 @@ async function handleCommand(command, payload) {
       return await createVariable(payload);
     case 'rename_variable':
       return await renameVariable(payload);
+    case 'delete_variables':
+      return await deleteVariables(payload);
+    case 'delete_variable_collection':
+      return await deleteVariableCollection(payload);
+    case 'rename_variable_collection':
+      return await renameVariableCollection(payload);
+    case 'rename_mode':
+      return await renameMode(payload);
+    case 'add_mode':
+      return await addMode(payload);
+    case 'delete_mode':
+      return await deleteMode(payload);
+    case 'unbind_variable':
+      return await unbindVariable(payload);
     // Page Management commands
     case 'create_page':
       return await createPage(payload);
@@ -2858,6 +2872,289 @@ async function renameVariable({ variableId, name }) {
     newName: variable.name,
     key: variable.key,
     type: variable.resolvedType
+  };
+}
+
+/**
+ * Delete one or more variables
+ */
+async function deleteVariables({ variableIds }) {
+  var deleted = [];
+  var errors = [];
+
+  for (var i = 0; i < variableIds.length; i++) {
+    var variableId = variableIds[i];
+    try {
+      var variable = await figma.variables.getVariableByIdAsync(variableId);
+      if (!variable) {
+        errors.push({ variableId: variableId, error: 'Variable not found' });
+        continue;
+      }
+
+      var info = {
+        variableId: variable.id,
+        name: variable.name,
+        type: variable.resolvedType
+      };
+
+      variable.remove();
+      deleted.push(info);
+    } catch (err) {
+      errors.push({ variableId: variableId, error: err.message });
+    }
+  }
+
+  return {
+    success: true,
+    deleted: deleted,
+    deletedCount: deleted.length,
+    errors: errors.length > 0 ? errors : undefined
+  };
+}
+
+/**
+ * Delete a variable collection
+ */
+async function deleteVariableCollection({ collectionId }) {
+  var collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    return {
+      error: {
+        code: 'COLLECTION_NOT_FOUND',
+        message: 'Variable collection not found: ' + collectionId
+      }
+    };
+  }
+
+  var info = {
+    collectionId: collection.id,
+    name: collection.name,
+    variableCount: collection.variableIds.length
+  };
+
+  collection.remove();
+
+  return {
+    success: true,
+    deleted: info
+  };
+}
+
+/**
+ * Rename a variable collection
+ */
+async function renameVariableCollection({ collectionId, name }) {
+  var collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    return {
+      error: {
+        code: 'COLLECTION_NOT_FOUND',
+        message: 'Variable collection not found: ' + collectionId
+      }
+    };
+  }
+
+  var oldName = collection.name;
+  collection.name = name;
+
+  return {
+    success: true,
+    collectionId: collection.id,
+    oldName: oldName,
+    newName: name
+  };
+}
+
+/**
+ * Rename a mode in a variable collection
+ */
+async function renameMode({ collectionId, modeId, name }) {
+  var collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    return {
+      error: {
+        code: 'COLLECTION_NOT_FOUND',
+        message: 'Variable collection not found: ' + collectionId
+      }
+    };
+  }
+
+  // Find the mode
+  var mode = null;
+  for (var i = 0; i < collection.modes.length; i++) {
+    if (collection.modes[i].modeId === modeId) {
+      mode = collection.modes[i];
+      break;
+    }
+  }
+
+  if (!mode) {
+    return {
+      error: {
+        code: 'MODE_NOT_FOUND',
+        message: 'Mode not found: ' + modeId
+      }
+    };
+  }
+
+  var oldName = mode.name;
+  collection.renameMode(modeId, name);
+
+  return {
+    success: true,
+    collectionId: collection.id,
+    modeId: modeId,
+    oldName: oldName,
+    newName: name
+  };
+}
+
+/**
+ * Add a mode to a variable collection
+ */
+async function addMode({ collectionId, name }) {
+  var collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    return {
+      error: {
+        code: 'COLLECTION_NOT_FOUND',
+        message: 'Variable collection not found: ' + collectionId
+      }
+    };
+  }
+
+  var modeId = collection.addMode(name);
+
+  return {
+    success: true,
+    collectionId: collection.id,
+    modeId: modeId,
+    name: name,
+    totalModes: collection.modes.length
+  };
+}
+
+/**
+ * Delete a mode from a variable collection
+ */
+async function deleteMode({ collectionId, modeId }) {
+  var collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    return {
+      error: {
+        code: 'COLLECTION_NOT_FOUND',
+        message: 'Variable collection not found: ' + collectionId
+      }
+    };
+  }
+
+  // Cannot delete last mode
+  if (collection.modes.length <= 1) {
+    return {
+      error: {
+        code: 'CANNOT_DELETE_LAST_MODE',
+        message: 'Cannot delete the last mode in a collection'
+      }
+    };
+  }
+
+  // Find the mode name before deleting
+  var modeName = null;
+  for (var i = 0; i < collection.modes.length; i++) {
+    if (collection.modes[i].modeId === modeId) {
+      modeName = collection.modes[i].name;
+      break;
+    }
+  }
+
+  if (!modeName) {
+    return {
+      error: {
+        code: 'MODE_NOT_FOUND',
+        message: 'Mode not found: ' + modeId
+      }
+    };
+  }
+
+  collection.removeMode(modeId);
+
+  return {
+    success: true,
+    collectionId: collection.id,
+    deletedModeId: modeId,
+    deletedModeName: modeName,
+    remainingModes: collection.modes.length
+  };
+}
+
+/**
+ * Unbind a variable from a node property
+ */
+async function unbindVariable({ nodeId, field, paintIndex }) {
+  var node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) {
+    return {
+      error: {
+        code: 'NODE_NOT_FOUND',
+        message: 'Node not found: ' + nodeId
+      }
+    };
+  }
+
+  paintIndex = paintIndex || 0;
+
+  // Handle fills and strokes specially
+  if (field === 'fills' || field === 'strokes') {
+    if (!(field in node)) {
+      return {
+        error: {
+          code: 'FIELD_NOT_SUPPORTED',
+          message: 'Node does not support ' + field
+        }
+      };
+    }
+
+    var paints = clone(node[field]);
+    if (!paints || !paints[paintIndex]) {
+      return {
+        error: {
+          code: 'PAINT_NOT_FOUND',
+          message: 'Paint not found at index ' + paintIndex
+        }
+      };
+    }
+
+    // Remove bound variables from the paint
+    if (paints[paintIndex].boundVariables) {
+      delete paints[paintIndex].boundVariables;
+    }
+
+    node[field] = paints;
+
+    return {
+      success: true,
+      nodeId: node.id,
+      field: field,
+      paintIndex: paintIndex
+    };
+  }
+
+  // For other fields, use setBoundVariable with null
+  try {
+    node.setBoundVariable(field, null);
+  } catch (err) {
+    return {
+      error: {
+        code: 'UNBIND_FAILED',
+        message: err.message
+      }
+    };
+  }
+
+  return {
+    success: true,
+    nodeId: node.id,
+    field: field
   };
 }
 

@@ -61,6 +61,13 @@ import {
   handleCreateVariableCollection,
   handleCreateVariable,
   handleRenameVariable,
+  handleDeleteVariables,
+  handleDeleteVariableCollection,
+  handleRenameVariableCollection,
+  handleRenameMode,
+  handleAddMode,
+  handleDeleteMode,
+  handleUnbindVariable,
   // Page Management commands
   handleCreatePage,
   handleRenamePage,
@@ -905,6 +912,83 @@ export function registerTools(server, bridge) {
       name: z.string().describe('The new name for the variable (use "/" for groups)')
     },
     async (args) => handleRenameVariable(bridge, args)
+  );
+
+  // figma_delete_variables - Delete one or more variables
+  server.tool(
+    'figma_delete_variables',
+    'Delete one or more variables from the document. Use with caution - this cannot be undone.',
+    {
+      variableIds: z.array(z.string()).describe('Array of variable IDs to delete')
+    },
+    async (args) => handleDeleteVariables(bridge, args)
+  );
+
+  // figma_delete_variable_collection - Delete a variable collection
+  server.tool(
+    'figma_delete_variable_collection',
+    'Delete a variable collection and all its variables. Use with caution - this cannot be undone.',
+    {
+      collectionId: z.string().describe('The collection ID to delete')
+    },
+    async (args) => handleDeleteVariableCollection(bridge, args)
+  );
+
+  // figma_rename_variable_collection - Rename a variable collection
+  server.tool(
+    'figma_rename_variable_collection',
+    'Rename a variable collection.',
+    {
+      collectionId: z.string().describe('The collection ID to rename'),
+      name: z.string().describe('The new name for the collection')
+    },
+    async (args) => handleRenameVariableCollection(bridge, args)
+  );
+
+  // figma_rename_mode - Rename a mode in a collection
+  server.tool(
+    'figma_rename_mode',
+    'Rename a mode in a variable collection (e.g., "Mode 1" to "dark").',
+    {
+      collectionId: z.string().describe('The collection ID containing the mode'),
+      modeId: z.string().describe('The mode ID to rename'),
+      name: z.string().describe('The new name for the mode')
+    },
+    async (args) => handleRenameMode(bridge, args)
+  );
+
+  // figma_add_mode - Add a mode to a collection
+  server.tool(
+    'figma_add_mode',
+    'Add a new mode to a variable collection.',
+    {
+      collectionId: z.string().describe('The collection ID to add mode to'),
+      name: z.string().describe('Name for the new mode')
+    },
+    async (args) => handleAddMode(bridge, args)
+  );
+
+  // figma_delete_mode - Delete a mode from a collection
+  server.tool(
+    'figma_delete_mode',
+    'Delete a mode from a variable collection. Cannot delete the last mode.',
+    {
+      collectionId: z.string().describe('The collection ID containing the mode'),
+      modeId: z.string().describe('The mode ID to delete')
+    },
+    async (args) => handleDeleteMode(bridge, args)
+  );
+
+  // figma_unbind_variable - Remove variable binding from a node
+  server.tool(
+    'figma_unbind_variable',
+    'Remove a variable binding from a node property.',
+    {
+      nodeId: z.string().describe('The node ID to unbind from'),
+      field: z.string().describe('The field to unbind (fills, strokes, opacity, cornerRadius, etc.)'),
+      paintIndex: z.number().optional().default(0).describe('Paint array index for fills/strokes')
+    },
+    async (args) => handleUnbindVariable(bridge, args)
   );
 
   // ============================================================

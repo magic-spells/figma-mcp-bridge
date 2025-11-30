@@ -2879,6 +2879,426 @@ export async function handleRenameVariable(bridge, args) {
   }
 }
 
+/**
+ * Delete one or more variables
+ */
+export async function handleDeleteVariables(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { variableIds } = args;
+
+  if (!variableIds || !Array.isArray(variableIds) || variableIds.length === 0) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'variableIds array is required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('delete_variables', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+/**
+ * Delete a variable collection
+ */
+export async function handleDeleteVariableCollection(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { collectionId } = args;
+
+  if (!collectionId) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'collectionId is required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('delete_variable_collection', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+/**
+ * Rename a variable collection
+ */
+export async function handleRenameVariableCollection(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { collectionId, name } = args;
+
+  if (!collectionId || !name) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'collectionId and name are required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('rename_variable_collection', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+/**
+ * Rename a mode in a variable collection
+ */
+export async function handleRenameMode(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { collectionId, modeId, name } = args;
+
+  if (!collectionId || !modeId || !name) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'collectionId, modeId, and name are required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('rename_mode', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+/**
+ * Add a mode to a variable collection
+ */
+export async function handleAddMode(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { collectionId, name } = args;
+
+  if (!collectionId || !name) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'collectionId and name are required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('add_mode', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+/**
+ * Delete a mode from a variable collection
+ */
+export async function handleDeleteMode(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { collectionId, modeId } = args;
+
+  if (!collectionId || !modeId) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'collectionId and modeId are required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('delete_mode', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+/**
+ * Unbind a variable from a node property
+ */
+export async function handleUnbindVariable(bridge, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'NOT_CONNECTED',
+            message: 'Figma plugin is not connected.'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  const { nodeId, field } = args;
+
+  if (!nodeId || !field) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: 'nodeId and field are required'
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('unbind_variable', args);
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify(result, null, 2)
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: {
+            code: error.code || 'UNKNOWN_ERROR',
+            message: error.message
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
 // ============================================================
 // Page Management Commands
 // ============================================================
