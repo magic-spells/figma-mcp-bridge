@@ -40,7 +40,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "ws": "^8.14.0"
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "ws": "^8.19.0"
   }
 }
