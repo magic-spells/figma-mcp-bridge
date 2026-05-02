@@ -299,6 +299,8 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 29. **The plugin's main catch normalizes non-Error throws** - `figma.ui.onmessage` handler in `plugin/code.js:38` converts string/plain-object/null throws into a usable `{ code, message }` shape. Without this, `error.message` would be `undefined` and surface as "Unknown error" on the MCP side. When throwing soft errors from a command handler, attach `.code` to the Error object and a meaningful `.message`.
 
+30. **`figma.createPage()` is Figma Design only** - The FigJam plugin runtime does NOT expose `figma.createPage()` — calling it returns `figma.createPage is not a function`. `PageNode.clone()` is similarly unavailable. Use the `requireFigmaDesign()` helper to gate these. FigJam files DO support multiple pages, but pages must be created from the FigJam UI; plugins cannot create them programmatically. Other page operations (`renamePage`, `deletePage`, `setCurrentPage`, `listPages`) work in both editors.
+
 ## Running the Server
 
 ```bash

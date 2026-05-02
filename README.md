@@ -713,8 +713,10 @@ Remove a variable binding from a node property.
 
 ### Page Management Commands
 
+> **FigJam restriction:** `figma_create_page` and `figma_duplicate_page` are **Figma Design only**. The FigJam plugin runtime does not expose `figma.createPage()` or `PageNode.clone()`. FigJam files can have multiple pages, but they must be created via the FigJam UI — plugins cannot create them programmatically. Calling these tools in FigJam returns `FIGMA_DESIGN_ONLY`. Other page operations (rename, delete, list, switch current page) work in both editors.
+
 #### `figma_create_page`
-Create a new page in the Figma document.
+Create a new page in the document. **Figma Design only.**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -739,7 +741,7 @@ Delete a page from the document.
 > **Note**: Cannot delete the last remaining page.
 
 #### `figma_duplicate_page`
-Clone an entire page including all its contents.
+Clone an entire page including all its contents. **Figma Design only.**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

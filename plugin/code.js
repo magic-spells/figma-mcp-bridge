@@ -2680,6 +2680,19 @@ function requireFigJam() {
 }
 
 /**
+ * Throws if not running in a Figma Design file. Used to gate Figma-Design-only
+ * commands like figma.createPage() — the FigJam plugin runtime simply doesn't
+ * expose those APIs, so calling them returns a cryptic "not a function" error.
+ */
+function requireFigmaDesign() {
+  if (figma.editorType !== 'figma') {
+    var err = new Error('This command requires a Figma Design file (current editor: ' + figma.editorType + ')');
+    err.code = 'FIGMA_DESIGN_ONLY';
+    throw err;
+  }
+}
+
+/**
  * Build a ConnectorEndpoint object from a flexible spec.
  * Spec shapes:
  *   { nodeId, magnet }                 -> magnet endpoint
@@ -3744,6 +3757,7 @@ function serializeGridStyle(style) {
  * Create a new page
  */
 async function createPage({ name, index }) {
+  requireFigmaDesign();
   const page = figma.createPage();
   page.name = name;
 
@@ -4075,6 +4089,7 @@ async function swapInstance({ instanceId, newComponentId }) {
  * Duplicate a page - clone entire page with all contents
  */
 async function duplicatePage({ pageId, name }) {
+  requireFigmaDesign();
   var page = await figma.getNodeByIdAsync(pageId);
 
   if (!page) {

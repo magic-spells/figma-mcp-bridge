@@ -44,6 +44,10 @@ Don't make the user discover the port themselves — surface it the first time y
 
 This server supports both Figma design files AND FigJam files. FigJam-specific tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) are gated to FigJam files and return a \`WRONG_EDITOR\` error if called against a Figma design file.
 
+**Editor-restricted tools:**
+- FigJam-only (return \`WRONG_EDITOR\` in design files): all sticky / shape-with-text / connector / table / code-block / link-preview tools
+- Figma Design only (return \`FIGMA_DESIGN_ONLY\` in FigJam): \`figma_create_page\`, \`figma_duplicate_page\`. FigJam files have pages but the plugin API does not expose page creation; pages must be created via the FigJam UI by the user.
+
 For flowcharts in FigJam:
 - \`figma_create_shape_with_text\` with \`shapeType\` (ROUNDED_RECTANGLE for processes, DIAMOND for decisions, ENG_DATABASE for data stores, etc.)
 - \`figma_create_connector\` with \`{ start: { nodeId, magnet: 'AUTO' }, end: { nodeId, magnet: 'AUTO' } }\` — \`endCap\` defaults to \`ARROW_EQUILATERAL\` so connectors look like arrows

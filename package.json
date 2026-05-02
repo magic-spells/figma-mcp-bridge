@@ -1,6 +1,6 @@
 {
   "name": "@magic-spells/figma-mcp-bridge",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "MCP server enabling Claude to read and manipulate Figma documents via WebSocket bridge",
   "type": "module",
   "main": "src/index.js",

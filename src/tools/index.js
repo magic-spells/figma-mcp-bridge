@@ -1074,10 +1074,10 @@ export function registerTools(server, bridge) {
   // Page Management Tools
   // ============================================================
 
-  // figma_create_page - Create a new page
+  // figma_create_page - Create a new page (Figma Design only)
   server.tool(
     'figma_create_page',
-    'Create a new page in the Figma document. Returns the created page.',
+    'Create a new page in the document. **Figma Design only — not available in FigJam.** Calling this in a FigJam file returns a FIGMA_DESIGN_ONLY error. FigJam files have pages but the plugin API does not expose figma.createPage(); pages must be created via the FigJam UI.',
     {
       name: z.string().describe('Name for the new page'),
       index: z.number().optional().describe('Position in the page list (0 = first). Defaults to end.')
@@ -1166,10 +1166,10 @@ export function registerTools(server, bridge) {
   // Additional Tools
   // ============================================================
 
-  // figma_duplicate_page - Clone an entire page
+  // figma_duplicate_page - Clone an entire page (Figma Design only)
   server.tool(
     'figma_duplicate_page',
-    'Clone an entire page including all its contents. The new page is inserted after the original.',
+    'Clone an entire page including all its contents. The new page is inserted after the original. **Figma Design only — not available in FigJam.** Returns FIGMA_DESIGN_ONLY in FigJam since the underlying figma.createPage() API is not exposed there.',
     {
       pageId: z.string().describe('The page ID to duplicate'),
       name: z.string().optional().describe('Name for the new page (defaults to "original name + copy")')
