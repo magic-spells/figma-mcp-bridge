@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 
 ## Features
 
-- **62 Figma operations** - Create shapes, modify styles, manage components, export assets
+- **63 Figma operations** - Create shapes, modify styles, manage components, variables, pages, and more
 - **Real-time bidirectional communication** - Changes appear instantly in Figma
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
 - **Full Figma API access** - Styles, variables, auto-layout, boolean operations, and more
@@ -108,6 +108,13 @@ Add to `.claude/settings.local.json`:
 ## Commands Reference
 
 ### Query Commands
+
+#### `figma_server_info`
+Get information about the MCP server including WebSocket port and connection status.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| *(none)* | | |
 
 #### `figma_get_context`
 Get the current Figma document context including file info, current page, and selection.
@@ -407,6 +414,46 @@ Set variable value or bind to node property.
 | `field` | string | No | Field to bind (`opacity`, `cornerRadius`, `fills`, etc.) |
 | `paintIndex` | number | No | Paint array index for fills/strokes (default 0) |
 
+#### `figma_set_text_style`
+Set text font properties on an existing text node.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | Text node ID |
+| `fontSize` | number | No | Font size in pixels |
+| `fontFamily` | string | No | Font family (e.g., "Inter") |
+| `fontStyle` | string | No | Font style (e.g., "Bold", "Regular") |
+| `textCase` | string | No | `ORIGINAL`, `UPPER`, `LOWER`, `TITLE` |
+| `textDecoration` | string | No | `NONE`, `UNDERLINE`, `STRIKETHROUGH` |
+| `lineHeight` | object | No | `{ unit: "AUTO" }` or `{ unit: "PIXELS", value: 24 }` |
+| `letterSpacing` | object | No | `{ unit: "PIXELS", value: 1 }` or `{ unit: "PERCENT", value: 5 }` |
+| `textAlignHorizontal` | string | No | `LEFT`, `CENTER`, `RIGHT`, `JUSTIFIED` |
+| `textAlignVertical` | string | No | `TOP`, `CENTER`, `BOTTOM` |
+
+#### `figma_create_paint_style`
+Create a local paint (color) style.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Style name (use `/` for folders, e.g., "Brand/Primary") |
+| `fills` | color | Yes | Fill color |
+| `description` | string | No | Style description |
+
+#### `figma_create_text_style`
+Create a local text style.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `name` | string | Yes | | Style name (use `/` for folders) |
+| `fontFamily` | string | No | `"Inter"` | Font family |
+| `fontStyle` | string | No | `"Regular"` | Font style |
+| `fontSize` | number | No | `16` | Font size in pixels |
+| `lineHeight` | object | No | | Line height |
+| `letterSpacing` | object | No | | Letter spacing |
+| `textCase` | string | No | | Text case transformation |
+| `textDecoration` | string | No | | Text decoration |
+| `description` | string | No | | Style description |
+
 ---
 
 ### Layout Commands
@@ -554,6 +601,178 @@ Detach instance from component (converts to frame).
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `nodeId` | string | Yes | Instance to detach |
+
+#### `figma_swap_instance`
+Swap a component instance to use a different component.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `instanceId` | string | Yes | Instance node ID to swap |
+| `newComponentId` | string | Yes | Component ID to swap to |
+
+#### `figma_combine_as_variants`
+Combine multiple components into a component set with variants.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `componentIds` | string[] | Yes | Array of component IDs (minimum 2). Components must use variant naming (e.g., "Size=Large") |
+
+---
+
+### Variable Management Commands
+
+#### `figma_create_variable_collection`
+Create a new variable collection to organize variables.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Collection name |
+| `modes` | string[] | No | Mode names (defaults to `["Mode 1"]`) |
+
+#### `figma_create_variable`
+Create a new variable in a collection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `collectionId` | string | Yes | Variable collection ID |
+| `name` | string | Yes | Variable name (use `/` for groups, e.g., "colors/primary") |
+| `type` | string | Yes | `COLOR`, `FLOAT`, `STRING`, or `BOOLEAN` |
+| `value` | any | No | Initial value for default mode |
+| `aliasOf` | string | No | Variable ID to alias (instead of direct value) |
+| `description` | string | No | Variable description |
+| `scopes` | string[] | No | Where this variable can be used |
+
+#### `figma_rename_variable`
+Rename an existing variable.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `variableId` | string | Yes | Variable ID to rename |
+| `name` | string | Yes | New name (use `/` for groups) |
+
+#### `figma_delete_variables`
+Delete one or more variables.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `variableIds` | string[] | Yes | Array of variable IDs to delete |
+
+#### `figma_rename_variable_collection`
+Rename a variable collection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `collectionId` | string | Yes | Collection ID to rename |
+| `name` | string | Yes | New name |
+
+#### `figma_delete_variable_collection`
+Delete a variable collection and all its variables.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `collectionId` | string | Yes | Collection ID to delete |
+
+#### `figma_add_mode`
+Add a new mode to a variable collection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `collectionId` | string | Yes | Collection ID to add mode to |
+| `name` | string | Yes | Name for the new mode |
+
+#### `figma_rename_mode`
+Rename a mode in a variable collection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `collectionId` | string | Yes | Collection ID containing the mode |
+| `modeId` | string | Yes | Mode ID to rename |
+| `name` | string | Yes | New name for the mode |
+
+#### `figma_delete_mode`
+Delete a mode from a variable collection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `collectionId` | string | Yes | Collection ID containing the mode |
+| `modeId` | string | Yes | Mode ID to delete |
+
+#### `figma_unbind_variable`
+Remove a variable binding from a node property.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `nodeId` | string | Yes | | Node ID to unbind from |
+| `field` | string | Yes | | Field to unbind (`fills`, `strokes`, `opacity`, etc.) |
+| `paintIndex` | number | No | `0` | Paint array index for fills/strokes |
+
+---
+
+### Page Management Commands
+
+#### `figma_create_page`
+Create a new page in the Figma document.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Name for the new page |
+| `index` | number | No | Position in the page list (0 = first). Defaults to end. |
+
+#### `figma_rename_page`
+Rename an existing page.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pageId` | string | Yes | Page ID to rename |
+| `name` | string | Yes | New name for the page |
+
+#### `figma_delete_page`
+Delete a page from the document.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pageId` | string | Yes | Page ID to delete |
+
+> **Note**: Cannot delete the last remaining page.
+
+#### `figma_duplicate_page`
+Clone an entire page including all its contents.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pageId` | string | Yes | Page ID to duplicate |
+| `name` | string | No | Name for the new page (defaults to "original name + copy") |
+
+---
+
+### Structure Commands
+
+#### `figma_reparent_nodes`
+Move nodes to a different parent container.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeIds` | string[] | Yes | Array of node IDs to move |
+| `newParentId` | string | Yes | New parent node ID (must be a frame, group, or page) |
+| `index` | number | No | Position within the new parent (0 = bottom/back). Defaults to top/front. |
+
+#### `figma_move_to_page`
+Move nodes from their current page to a different page.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeIds` | string[] | Yes | Array of node IDs to move |
+| `targetPageId` | string | Yes | Destination page ID |
+| `x` | number | No | X position on target page |
+| `y` | number | No | Y position on target page |
+
+#### `figma_set_rotation`
+Set the rotation of one or more nodes.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeIds` | string[] | Yes | Array of node IDs to rotate |
+| `rotation` | number | Yes | Rotation in degrees (-180 to 180) |
 
 ---
 
