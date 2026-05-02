@@ -762,18 +762,16 @@ Create a sticky note. Default size is fixed (240×240); width/height are not con
 | `text` | string | No | | Sticky note body text |
 | `fills` | color | No | | Background color of the sticky |
 | `isWideWidth` | boolean | No | | Use the wide rectangular sticky variant |
-| `authorName` | string | No | | Author display name shown on the sticky |
-| `authorVisible` | boolean | No | | Whether to show the author label |
 | `parentId` | string | No | | Parent node ID (defaults to current page) |
 
+> **Author info is read-only at runtime.** Figma's plugin docs list `authorName` and `authorVisible` as R/W on `StickyNode`, but the FigJam runtime rejects writes with "no setter for property". Figma auto-populates both from the active user's identity, so the labeling works correctly without programmatic control.
+
 #### `figma_set_sticky`
-Update a sticky note's author label and width variant. Use `figma_set_text` to change the body text.
+Toggle a sticky between square and wide-rectangle variants. Use `figma_set_text` to change the body text.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `nodeId` | string | Yes | The `STICKY` node ID |
-| `authorName` | string | No | New author name |
-| `authorVisible` | boolean | No | Show or hide the author label |
 | `isWideWidth` | boolean | No | Wide vs square sticky |
 
 #### `figma_create_shape_with_text`

@@ -1234,15 +1234,13 @@ export function registerTools(server, bridge) {
   // figma_create_sticky - Create a sticky note
   server.tool(
     'figma_create_sticky',
-    'FigJam: create a sticky note. Default size is fixed (240×240); width/height are not configurable. Text is set via the embedded sublayer (font auto-loaded).',
+    'FigJam: create a sticky note. Default size is fixed (240×240); width/height are not configurable. Text is set via the embedded sublayer (font auto-loaded). Note: the author name and visibility are auto-populated by Figma from the active user — they cannot be set programmatically.',
     {
       x: z.number().optional().default(0).describe('X position'),
       y: z.number().optional().default(0).describe('Y position'),
       text: z.string().optional().describe('Sticky note body text'),
       fills: colorSchema.optional().describe('Background color of the sticky'),
       isWideWidth: z.boolean().optional().describe('Use the wide rectangular sticky variant'),
-      authorName: z.string().optional().describe('Author display name shown on the sticky'),
-      authorVisible: z.boolean().optional().describe('Whether to show the author label'),
       parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
     },
     async (args) => handleCreateSticky(bridge, args)
@@ -1251,11 +1249,9 @@ export function registerTools(server, bridge) {
   // figma_set_sticky - Update a sticky's metadata
   server.tool(
     'figma_set_sticky',
-    'FigJam: update a sticky note\'s author label and width variant. Use figma_set_text to change the body text.',
+    'FigJam: toggle a sticky note between square (240×240) and wide-rectangle variants. Use figma_set_text to change the body text. (Author name/visibility are read-only at runtime — Figma sets them from the active user.)',
     {
       nodeId: z.string().describe('The STICKY node ID'),
-      authorName: z.string().optional().describe('New author name'),
-      authorVisible: z.boolean().optional().describe('Show or hide the author label'),
       isWideWidth: z.boolean().optional().describe('Wide vs square sticky')
     },
     async (args) => handleSetSticky(bridge, args)

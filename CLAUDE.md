@@ -118,8 +118,8 @@ validateConnectorMagnet(lineType, startEndpoint);          // STRAIGHT lines onl
 
 | Tool | Creates / modifies | Notes |
 |------|--------------------|-------|
-| `figma_create_sticky` | `STICKY` | Width/height fixed; `text` is sublayer |
-| `figma_set_sticky` | `STICKY` | author/wide-width meta only |
+| `figma_create_sticky` | `STICKY` | Width/height fixed; `text` is sublayer; author info auto-set by Figma (read-only) |
+| `figma_set_sticky` | `STICKY` | `isWideWidth` toggle only — author props are read-only at runtime |
 | `figma_create_shape_with_text` | `SHAPE_WITH_TEXT` | 30 `shapeType` values (ROUNDED_RECTANGLE, DIAMOND, ENG_DATABASE, …); `cornerRadius` is readonly |
 | `figma_set_shape_type` | `SHAPE_WITH_TEXT` | Change shape variant |
 | `figma_create_connector` | `CONNECTOR` | `start`/`end` endpoints, `lineType` (ELBOWED/STRAIGHT/CURVED), default `endCap: ARROW_EQUILATERAL` |
@@ -290,6 +290,14 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 24. **Stamps/Highlights/WashiTape/Widgets cannot be created from plugins** - Only cloned from existing user-placed instances. They serialize their `stuckTo` node ID for inspection.
 
 25. **`editorType` is exposed in `figma_get_context`** - Returns `"figma"` or `"figjam"`. The `requireFigJam()` plugin helper guards FigJam-only commands; `WRONG_EDITOR` is the standard error code.
+
+26. **`StickyNode.authorName` / `authorVisible` are read-only at runtime** - Figma's docs list them as R/W, but the FigJam plugin runtime throws "no setter for property" on assignment. Figma auto-populates both from the active user's identity. The schemas for `figma_create_sticky` / `figma_set_sticky` deliberately do NOT expose these. Don't add them back unless you've verified the runtime accepts writes.
+
+27. **`CodeBlockNode.code` setter requires Source Code Pro Medium** - `block.code = '...'` throws `Cannot write to node with unloaded font "Source Code Pro Medium"` if the font isn't preloaded. Both `createCodeBlock` and `setCodeBlock` `await figma.loadFontAsync({ family: 'Source Code Pro', style: 'Medium' })` before assigning. Setting `codeLanguage` alone does NOT require font load.
+
+28. **Connectors default to Inter Medium** - Not Inter Regular. The `loadFontForSublayer` helper cascades through Inter Medium → Inter Regular when the sublayer's `fontName` getter doesn't return a usable value. Single fixed font is brittle; the cascade is required.
+
+29. **The plugin's main catch normalizes non-Error throws** - `figma.ui.onmessage` handler in `plugin/code.js:38` converts string/plain-object/null throws into a usable `{ code, message }` shape. Without this, `error.message` would be `undefined` and surface as "Unknown error" on the MCP side. When throwing soft errors from a command handler, attach `.code` to the Error object and a meaningful `.message`.
 
 ## Running the Server
 

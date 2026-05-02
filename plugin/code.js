@@ -36,14 +36,19 @@ figma.ui.onmessage = async (msg) => {
         payload: safeClone(result)
       });
     } catch (error) {
+      // Normalize: Figma's internal API sometimes throws non-Error values.
+      // Without this, error.message would be undefined and surface as "Unknown error".
+      var msg =
+        (error && error.message) ||
+        (typeof error === 'string' ? error : null) ||
+        (function () { try { return JSON.stringify(error); } catch (_) { return null; } })() ||
+        'Unknown error';
+      var code = (error && error.code) || 'OPERATION_FAILED';
       figma.ui.postMessage({
         type: 'command_response',
         requestId,
         payload: {
-          error: {
-            code: 'OPERATION_FAILED',
-            message: error.message
-          }
+          error: { code: code, message: msg }
         }
       });
     }
@@ -2713,14 +2718,33 @@ function validateConnectorMagnet(lineType, endpoint) {
 
 /**
  * Load the font for a TextSublayerNode (sticky/shape/connector/cell).
- * Falls back to Inter Regular if fontName is mixed.
+ *
+ * Reads the sublayer's reported fontName when available, else cascades through
+ * known FigJam defaults. Connectors use Inter Medium by default; stickies/shapes/
+ * cells use Inter Regular. The fontName getter on a freshly-created node can
+ * throw or return mixed/unloadable values, so the read is wrapped in try/catch.
  */
 async function loadFontForSublayer(textSublayer) {
-  var fontName = textSublayer.fontName;
-  if (fontName && fontName !== figma.mixed) {
-    await figma.loadFontAsync(fontName);
-  } else {
-    await figma.loadFontAsync({ family: 'Inter', style: 'Regular' });
+  try {
+    var fontName = textSublayer && textSublayer.fontName;
+    if (fontName && fontName !== figma.mixed && fontName.family) {
+      await figma.loadFontAsync(fontName);
+      return;
+    }
+  } catch (_) {
+    // fall through to defaults
+  }
+  var fallbacks = [
+    { family: 'Inter', style: 'Medium' },
+    { family: 'Inter', style: 'Regular' }
+  ];
+  for (var i = 0; i < fallbacks.length; i++) {
+    try {
+      await figma.loadFontAsync(fallbacks[i]);
+      return;
+    } catch (_) {
+      // try next
+    }
   }
 }
 
@@ -4267,17 +4291,16 @@ async function createSticky(params) {
   var text = params.text;
   var fills = params.fills;
   var isWideWidth = params.isWideWidth;
-  var authorName = params.authorName;
-  var authorVisible = params.authorVisible;
   var parentId = params.parentId;
+
+  // Note: authorName/authorVisible are NOT writable at runtime despite Figma's docs.
+  // Figma populates them automatically from the active user; setting throws "no setter for property".
 
   var sticky = figma.createSticky();
   sticky.x = x;
   sticky.y = y;
 
   if (isWideWidth !== undefined) sticky.isWideWidth = isWideWidth;
-  if (authorName !== undefined) sticky.authorName = authorName;
-  if (authorVisible !== undefined) sticky.authorVisible = authorVisible;
   if (fills) sticky.fills = normalizeFills(fills);
 
   if (text !== undefined && text !== null) {
@@ -4298,8 +4321,6 @@ async function setSticky(params) {
     throw new Error('Node ' + params.nodeId + ' is not a sticky (type: ' + node.type + ')');
   }
 
-  if (params.authorName !== undefined) node.authorName = params.authorName;
-  if (params.authorVisible !== undefined) node.authorVisible = params.authorVisible;
   if (params.isWideWidth !== undefined) node.isWideWidth = params.isWideWidth;
 
   return { success: true, node: serializeNode(node, 'full') };
@@ -4700,6 +4721,9 @@ async function createCodeBlock(params) {
   var codeLanguage = params.codeLanguage || 'PLAINTEXT';
   var parentId = params.parentId;
 
+  // CodeBlockNode.code setter requires Source Code Pro Medium to be loaded
+  await figma.loadFontAsync({ family: 'Source Code Pro', style: 'Medium' });
+
   var block = figma.createCodeBlock();
   block.x = x;
   block.y = y;
@@ -4719,7 +4743,11 @@ async function setCodeBlock(params) {
     throw new Error('Node ' + params.nodeId + ' is not a code block (type: ' + node.type + ')');
   }
 
-  if (params.code !== undefined) node.code = params.code;
+  if (params.code !== undefined) {
+    // Same font requirement as creation
+    await figma.loadFontAsync({ family: 'Source Code Pro', style: 'Medium' });
+    node.code = params.code;
+  }
   if (params.codeLanguage !== undefined) node.codeLanguage = params.codeLanguage;
 
   return { success: true, node: serializeNode(node, 'full') };
