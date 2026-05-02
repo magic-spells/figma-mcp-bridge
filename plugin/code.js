@@ -204,6 +204,50 @@ async function handleCommand(command, payload) {
     case 'combine_as_variants':
       return await combineAsVariants(payload);
 
+    // FigJam commands
+    case 'create_sticky':
+      return await createSticky(payload);
+    case 'set_sticky':
+      return await setSticky(payload);
+    case 'create_shape_with_text':
+      return await createShapeWithText(payload);
+    case 'set_shape_type':
+      return await setShapeType(payload);
+    case 'create_connector':
+      return await createConnector(payload);
+    case 'set_connector':
+      return await setConnector(payload);
+    case 'create_section':
+      return await createSection(payload);
+    case 'set_section':
+      return await setSection(payload);
+    case 'create_table':
+      return await createTable(payload);
+    case 'set_table_cell':
+      return await setTableCell(payload);
+    case 'insert_table_row':
+      return await insertTableRow(payload);
+    case 'insert_table_column':
+      return await insertTableColumn(payload);
+    case 'remove_table_row':
+      return await removeTableRow(payload);
+    case 'remove_table_column':
+      return await removeTableColumn(payload);
+    case 'resize_table_row':
+      return await resizeTableRow(payload);
+    case 'resize_table_column':
+      return await resizeTableColumn(payload);
+    case 'move_table_row':
+      return await moveTableRow(payload);
+    case 'move_table_column':
+      return await moveTableColumn(payload);
+    case 'create_code_block':
+      return await createCodeBlock(payload);
+    case 'set_code_block':
+      return await setCodeBlock(payload);
+    case 'create_link_preview':
+      return await createLinkPreview(payload);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -368,6 +412,23 @@ async function setText({ nodeId, text }) {
   if (!node) {
     throw new Error(`Node not found: ${nodeId}`);
   }
+
+  // FigJam TextSublayer-bearing nodes: text is a sublayer, not a child node
+  if (
+    node.type === 'STICKY' ||
+    node.type === 'SHAPE_WITH_TEXT' ||
+    node.type === 'CONNECTOR' ||
+    node.type === 'TABLE_CELL'
+  ) {
+    await loadFontForSublayer(node.text);
+    node.text.characters = text;
+    return {
+      success: true,
+      nodeId: node.id,
+      characters: node.text.characters
+    };
+  }
+
   if (node.type !== 'TEXT') {
     throw new Error(`Node ${nodeId} is not a text node (type: ${node.type})`);
   }
@@ -2603,6 +2664,67 @@ async function reorderNode({ nodeId, position }) {
 // ============================================================
 
 /**
+ * Throws if not running in FigJam. Used to gate FigJam-only commands.
+ */
+function requireFigJam() {
+  if (figma.editorType !== 'figjam') {
+    var err = new Error('This command requires a FigJam file (current editor: ' + figma.editorType + ')');
+    err.code = 'WRONG_EDITOR';
+    throw err;
+  }
+}
+
+/**
+ * Build a ConnectorEndpoint object from a flexible spec.
+ * Spec shapes:
+ *   { nodeId, magnet }                 -> magnet endpoint
+ *   { nodeId, position: { x, y } }     -> fixed-position-on-node endpoint
+ *   { position: { x, y } }             -> free-floating canvas endpoint
+ * Returns null if spec is null/undefined.
+ */
+function buildConnectorEndpoint(spec) {
+  if (!spec) return null;
+  if (spec.nodeId) {
+    if (spec.position) {
+      return { endpointNodeId: spec.nodeId, position: spec.position };
+    }
+    return { endpointNodeId: spec.nodeId, magnet: spec.magnet || 'AUTO' };
+  }
+  if (spec.position) {
+    return { position: spec.position };
+  }
+  return null;
+}
+
+/**
+ * Validate magnet value against connector lineType.
+ * STRAIGHT connectors only support CENTER and NONE magnets.
+ */
+function validateConnectorMagnet(lineType, endpoint) {
+  if (!endpoint || !('magnet' in endpoint)) return;
+  if (lineType === 'STRAIGHT') {
+    if (endpoint.magnet !== 'CENTER' && endpoint.magnet !== 'NONE') {
+      var err = new Error('STRAIGHT connectors only support CENTER or NONE magnets (got: ' + endpoint.magnet + ')');
+      err.code = 'INVALID_MAGNET';
+      throw err;
+    }
+  }
+}
+
+/**
+ * Load the font for a TextSublayerNode (sticky/shape/connector/cell).
+ * Falls back to Inter Regular if fontName is mixed.
+ */
+async function loadFontForSublayer(textSublayer) {
+  var fontName = textSublayer.fontName;
+  if (fontName && fontName !== figma.mixed) {
+    await figma.loadFontAsync(fontName);
+  } else {
+    await figma.loadFontAsync({ family: 'Inter', style: 'Regular' });
+  }
+}
+
+/**
  * Convert color shorthand to Figma fills array
  * Supports:
  *   - { color: "#RRGGBB" }
@@ -2680,13 +2802,39 @@ function hexToRgb(hex) {
 async function setTextStyle({ nodeId, fontSize, fontFamily, fontStyle, textCase, textDecoration, lineHeight, letterSpacing, textAlignHorizontal, textAlignVertical }) {
   var node = await figma.getNodeByIdAsync(nodeId);
   if (!node) throw new Error('Node not found: ' + nodeId);
-  if (node.type !== 'TEXT') throw new Error('Node ' + nodeId + ' is not a text node');
+
+  // Resolve text target: TEXT node, or TextSublayer for FigJam types
+  var target;
+  var isSublayer = false;
+  if (node.type === 'TEXT') {
+    target = node;
+  } else if (
+    node.type === 'STICKY' ||
+    node.type === 'SHAPE_WITH_TEXT' ||
+    node.type === 'CONNECTOR' ||
+    node.type === 'TABLE_CELL'
+  ) {
+    target = node.text;
+    isSublayer = true;
+  } else {
+    throw new Error('Node ' + nodeId + ' is not a text-bearing node (type: ' + node.type + ')');
+  }
+
+  // Sublayers do not support textAlignVertical
+  if (isSublayer && textAlignVertical !== undefined) {
+    throw new Error('textAlignVertical cannot be set on a TextSublayer (' + node.type + ')');
+  }
 
   // Determine target font
-  var currentFont = node.fontName;
+  var currentFont = target.fontName;
   if (currentFont === figma.mixed) {
-    // For mixed fonts, get the first character's font as base
-    currentFont = node.getRangeFontName(0, 1);
+    if (!isSublayer) {
+      // For mixed fonts on TEXT node, get the first character's font as base
+      currentFont = target.getRangeFontName(0, 1);
+    } else {
+      // Sublayers don't expose getRangeFontName — fall back to Inter
+      currentFont = { family: 'Inter', style: 'Regular' };
+    }
   }
 
   var targetFamily = fontFamily || currentFont.family;
@@ -2697,29 +2845,30 @@ async function setTextStyle({ nodeId, fontSize, fontFamily, fontStyle, textCase,
 
   // Apply font name if changed
   if (fontFamily || fontStyle) {
-    node.fontName = { family: targetFamily, style: targetStyle };
+    target.fontName = { family: targetFamily, style: targetStyle };
   }
 
   // Apply other properties
-  if (fontSize !== undefined) node.fontSize = fontSize;
-  if (textCase !== undefined) node.textCase = textCase;
-  if (textDecoration !== undefined) node.textDecoration = textDecoration;
-  if (lineHeight !== undefined) node.lineHeight = lineHeight;
-  if (letterSpacing !== undefined) node.letterSpacing = letterSpacing;
-  if (textAlignHorizontal !== undefined) node.textAlignHorizontal = textAlignHorizontal;
-  if (textAlignVertical !== undefined) node.textAlignVertical = textAlignVertical;
+  if (fontSize !== undefined) target.fontSize = fontSize;
+  if (textCase !== undefined) target.textCase = textCase;
+  if (textDecoration !== undefined) target.textDecoration = textDecoration;
+  if (lineHeight !== undefined) target.lineHeight = lineHeight;
+  if (letterSpacing !== undefined) target.letterSpacing = letterSpacing;
+  if (textAlignHorizontal !== undefined) target.textAlignHorizontal = textAlignHorizontal;
+  if (!isSublayer && textAlignVertical !== undefined) target.textAlignVertical = textAlignVertical;
 
   return {
     success: true,
     nodeId: node.id,
-    fontName: clone(node.fontName),
-    fontSize: node.fontSize,
-    textCase: node.textCase,
-    textDecoration: node.textDecoration,
-    lineHeight: clone(node.lineHeight),
-    letterSpacing: clone(node.letterSpacing),
-    textAlignHorizontal: node.textAlignHorizontal,
-    textAlignVertical: node.textAlignVertical
+    isSublayer: isSublayer,
+    fontName: clone(target.fontName),
+    fontSize: target.fontSize,
+    textCase: target.textCase,
+    textDecoration: target.textDecoration,
+    lineHeight: clone(target.lineHeight),
+    letterSpacing: clone(target.letterSpacing),
+    textAlignHorizontal: target.textAlignHorizontal,
+    textAlignVertical: isSublayer ? undefined : target.textAlignVertical
   };
 }
 
@@ -3228,11 +3377,21 @@ function serializeNode(node, depth) {
 
   if ('fills' in node) {
     base.fills = clone(node.fills);
+  }
+  if ('strokes' in node) {
     base.strokes = clone(node.strokes);
     base.strokeWeight = node.strokeWeight;
-    base.strokeAlign = node.strokeAlign;
+    if ('strokeAlign' in node) {
+      base.strokeAlign = node.strokeAlign;
+    }
+  }
+  if ('effects' in node) {
     base.effects = clone(node.effects);
+  }
+  if ('opacity' in node) {
     base.opacity = node.opacity;
+  }
+  if ('blendMode' in node) {
     base.blendMode = node.blendMode;
   }
 
@@ -3283,6 +3442,69 @@ function serializeNode(node, depth) {
   // Skip mainComponent for now - requires async which complicates serialization
   if (node.type === 'INSTANCE') {
     base.isInstance = true;
+  }
+
+  // FigJam-specific node properties
+  if (node.type === 'STICKY') {
+    if (node.text) {
+      base.text = { characters: node.text.characters };
+    }
+    base.authorVisible = node.authorVisible;
+    base.authorName = node.authorName;
+    base.isWideWidth = node.isWideWidth;
+  } else if (node.type === 'SHAPE_WITH_TEXT') {
+    base.shapeType = node.shapeType;
+    if (node.text) {
+      base.text = { characters: node.text.characters };
+    }
+  } else if (node.type === 'CONNECTOR') {
+    base.connectorLineType = node.connectorLineType;
+    base.connectorStart = clone(node.connectorStart);
+    base.connectorEnd = clone(node.connectorEnd);
+    base.connectorStartStrokeCap = node.connectorStartStrokeCap;
+    base.connectorEndStrokeCap = node.connectorEndStrokeCap;
+    if (node.text) {
+      base.text = { characters: node.text.characters };
+    }
+  } else if (node.type === 'TABLE') {
+    base.numRows = node.numRows;
+    base.numColumns = node.numColumns;
+  } else if (node.type === 'TABLE_CELL') {
+    if (node.text) {
+      base.text = { characters: node.text.characters };
+    }
+    base.rowIndex = node.rowIndex;
+    base.columnIndex = node.columnIndex;
+  } else if (node.type === 'SECTION') {
+    base.sectionContentsHidden = node.sectionContentsHidden;
+    base.devStatus = clone(node.devStatus);
+  } else if (node.type === 'CODE_BLOCK') {
+    base.code = node.code;
+    base.codeLanguage = node.codeLanguage;
+  } else if (node.type === 'EMBED') {
+    base.embedData = clone(node.embedData);
+  } else if (node.type === 'LINK_UNFURL') {
+    base.linkUnfurlData = clone(node.linkUnfurlData);
+  } else if (node.type === 'MEDIA') {
+    base.mediaData = clone(node.mediaData);
+  } else if (node.type === 'STAMP' || node.type === 'HIGHLIGHT' || node.type === 'WASHI_TAPE') {
+    if (node.stuckTo) {
+      base.stuckToId = node.stuckTo.id;
+    }
+  }
+
+  // Connector relationships (FigJam — present on most scene nodes)
+  if ('attachedConnectors' in node && node.attachedConnectors) {
+    var attached = node.attachedConnectors;
+    if (attached.length > 0) {
+      base.attachedConnectorIds = attached.map(function(c) { return c.id; });
+    }
+  }
+  if ('stuckNodes' in node && node.stuckNodes) {
+    var stuck = node.stuckNodes;
+    if (stuck.length > 0) {
+      base.stuckNodeIds = stuck.map(function(n) { return n.id; });
+    }
   }
 
   if ('children' in node) {
@@ -4015,5 +4237,519 @@ async function combineAsVariants(params) {
       variantCount: componentSet.children.length,
       variantGroupProperties: componentSet.variantGroupProperties ? clone(componentSet.variantGroupProperties) : {}
     }
+  };
+}
+
+// ============================================================
+// FigJam Commands
+// ============================================================
+
+/**
+ * Common parent-attachment helper for FigJam node creation.
+ */
+async function attachToParent(node, parentId) {
+  if (parentId) {
+    var parent = await figma.getNodeByIdAsync(parentId);
+    if (parent && 'appendChild' in parent) {
+      parent.appendChild(node);
+      return;
+    }
+  }
+  figma.currentPage.appendChild(node);
+}
+
+// ---- FigJam: Sticky ----------------------------------------
+
+async function createSticky(params) {
+  requireFigJam();
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var text = params.text;
+  var fills = params.fills;
+  var isWideWidth = params.isWideWidth;
+  var authorName = params.authorName;
+  var authorVisible = params.authorVisible;
+  var parentId = params.parentId;
+
+  var sticky = figma.createSticky();
+  sticky.x = x;
+  sticky.y = y;
+
+  if (isWideWidth !== undefined) sticky.isWideWidth = isWideWidth;
+  if (authorName !== undefined) sticky.authorName = authorName;
+  if (authorVisible !== undefined) sticky.authorVisible = authorVisible;
+  if (fills) sticky.fills = normalizeFills(fills);
+
+  if (text !== undefined && text !== null) {
+    await loadFontForSublayer(sticky.text);
+    sticky.text.characters = text;
+  }
+
+  await attachToParent(sticky, parentId);
+
+  return { success: true, node: serializeNode(sticky, 'full') };
+}
+
+async function setSticky(params) {
+  requireFigJam();
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error('Node not found: ' + params.nodeId);
+  if (node.type !== 'STICKY') {
+    throw new Error('Node ' + params.nodeId + ' is not a sticky (type: ' + node.type + ')');
+  }
+
+  if (params.authorName !== undefined) node.authorName = params.authorName;
+  if (params.authorVisible !== undefined) node.authorVisible = params.authorVisible;
+  if (params.isWideWidth !== undefined) node.isWideWidth = params.isWideWidth;
+
+  return { success: true, node: serializeNode(node, 'full') };
+}
+
+// ---- FigJam: Shape with Text -------------------------------
+
+async function createShapeWithText(params) {
+  requireFigJam();
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var width = params.width !== undefined ? params.width : 208;
+  var height = params.height !== undefined ? params.height : 208;
+  var shapeType = params.shapeType;
+  var text = params.text;
+  var fills = params.fills;
+  var strokes = params.strokes;
+  var strokeWeight = params.strokeWeight;
+  var parentId = params.parentId;
+
+  if (!shapeType) {
+    var err = new Error('shapeType is required');
+    err.code = 'INVALID_PARAMS';
+    throw err;
+  }
+
+  var shape = figma.createShapeWithText();
+  // Set shapeType BEFORE positioning/text so the shape's natural geometry is correct
+  shape.shapeType = shapeType;
+  shape.x = x;
+  shape.y = y;
+  shape.resize(width, height);
+
+  if (fills) shape.fills = normalizeFills(fills);
+  if (strokes) shape.strokes = normalizeFills(strokes);
+  if (strokeWeight !== undefined) shape.strokeWeight = strokeWeight;
+
+  if (text !== undefined && text !== null) {
+    await loadFontForSublayer(shape.text);
+    shape.text.characters = text;
+  }
+
+  await attachToParent(shape, parentId);
+
+  return { success: true, node: serializeNode(shape, 'full') };
+}
+
+async function setShapeType(params) {
+  requireFigJam();
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error('Node not found: ' + params.nodeId);
+  if (node.type !== 'SHAPE_WITH_TEXT') {
+    throw new Error('Node ' + params.nodeId + ' is not a shape-with-text (type: ' + node.type + ')');
+  }
+
+  node.shapeType = params.shapeType;
+
+  return { success: true, nodeId: node.id, shapeType: node.shapeType };
+}
+
+// ---- FigJam: Connector -------------------------------------
+
+async function createConnector(params) {
+  requireFigJam();
+  var lineType = params.lineType || 'ELBOWED';
+  var startCap = params.startCap || 'NONE';
+  var endCap = params.endCap || 'ARROW_EQUILATERAL';
+  var startEndpoint = buildConnectorEndpoint(params.start);
+  var endEndpoint = buildConnectorEndpoint(params.end);
+  var text = params.text;
+  var strokes = params.strokes;
+  var strokeWeight = params.strokeWeight;
+  var parentId = params.parentId;
+
+  validateConnectorMagnet(lineType, startEndpoint);
+  validateConnectorMagnet(lineType, endEndpoint);
+
+  var connector = figma.createConnector();
+  connector.connectorLineType = lineType;
+
+  if (startEndpoint) connector.connectorStart = startEndpoint;
+  if (endEndpoint) connector.connectorEnd = endEndpoint;
+
+  connector.connectorStartStrokeCap = startCap;
+  connector.connectorEndStrokeCap = endCap;
+
+  if (strokes) connector.strokes = normalizeFills(strokes);
+  if (strokeWeight !== undefined) connector.strokeWeight = strokeWeight;
+
+  if (text !== undefined && text !== null && text !== '') {
+    await loadFontForSublayer(connector.text);
+    connector.text.characters = text;
+  }
+
+  await attachToParent(connector, parentId);
+
+  return { success: true, node: serializeNode(connector, 'full') };
+}
+
+async function setConnector(params) {
+  requireFigJam();
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error('Node not found: ' + params.nodeId);
+  if (node.type !== 'CONNECTOR') {
+    throw new Error('Node ' + params.nodeId + ' is not a connector (type: ' + node.type + ')');
+  }
+
+  // Determine target lineType (use new if provided, else current) for magnet validation
+  var lineType = params.lineType !== undefined ? params.lineType : node.connectorLineType;
+
+  if (params.lineType !== undefined) {
+    node.connectorLineType = params.lineType;
+  }
+
+  if (params.start !== undefined) {
+    var startEndpoint = buildConnectorEndpoint(params.start);
+    validateConnectorMagnet(lineType, startEndpoint);
+    if (startEndpoint) node.connectorStart = startEndpoint;
+  }
+
+  if (params.end !== undefined) {
+    var endEndpoint = buildConnectorEndpoint(params.end);
+    validateConnectorMagnet(lineType, endEndpoint);
+    if (endEndpoint) node.connectorEnd = endEndpoint;
+  }
+
+  if (params.startCap !== undefined) {
+    node.connectorStartStrokeCap = params.startCap;
+  }
+  if (params.endCap !== undefined) {
+    node.connectorEndStrokeCap = params.endCap;
+  }
+
+  if (params.text !== undefined) {
+    await loadFontForSublayer(node.text);
+    node.text.characters = params.text;
+  }
+
+  return { success: true, node: serializeNode(node, 'full') };
+}
+
+// ---- FigJam (and Figma): Section ---------------------------
+
+async function createSection(params) {
+  // Sections work in BOTH editors — no requireFigJam() guard
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var width = params.width !== undefined ? params.width : 600;
+  var height = params.height !== undefined ? params.height : 400;
+  var name = params.name;
+  var fills = params.fills;
+  var sectionContentsHidden = params.sectionContentsHidden;
+  var devStatus = params.devStatus;
+  var devStatusDescription = params.devStatusDescription;
+  var parentId = params.parentId;
+
+  var section = figma.createSection();
+  if (name) section.name = name;
+  section.x = x;
+  section.y = y;
+
+  if ('resizeWithoutConstraints' in section) {
+    section.resizeWithoutConstraints(width, height);
+  } else if ('resize' in section) {
+    section.resize(width, height);
+  }
+
+  if (fills) section.fills = normalizeFills(fills);
+  if (sectionContentsHidden !== undefined) {
+    section.sectionContentsHidden = sectionContentsHidden;
+  }
+
+  await attachToParent(section, parentId);
+
+  // devStatus must be applied after the section has its final parent
+  // (it can only be set on nodes directly under a page or section)
+  var devStatusError = null;
+  if (devStatus) {
+    try {
+      section.devStatus = { type: devStatus, description: devStatusDescription || '' };
+    } catch (e) {
+      devStatusError = e.message;
+    }
+  }
+
+  var result = { success: true, node: serializeNode(section, 'full') };
+  if (devStatusError) result.devStatusError = devStatusError;
+  return result;
+}
+
+async function setSection(params) {
+  // Works in both editors
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error('Node not found: ' + params.nodeId);
+  if (node.type !== 'SECTION') {
+    throw new Error('Node ' + params.nodeId + ' is not a section (type: ' + node.type + ')');
+  }
+
+  if (params.name !== undefined) node.name = params.name;
+  if (params.sectionContentsHidden !== undefined) {
+    node.sectionContentsHidden = params.sectionContentsHidden;
+  }
+  if (params.devStatus !== undefined) {
+    if (params.devStatus === null) {
+      node.devStatus = null;
+    } else {
+      node.devStatus = { type: params.devStatus, description: params.devStatusDescription || '' };
+    }
+  }
+
+  return { success: true, node: serializeNode(node, 'full') };
+}
+
+// ---- FigJam: Table -----------------------------------------
+
+async function createTable(params) {
+  requireFigJam();
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var numRows = params.numRows !== undefined ? params.numRows : 2;
+  var numColumns = params.numColumns !== undefined ? params.numColumns : 2;
+  var cells = params.cells;
+  var fills = params.fills;
+  var parentId = params.parentId;
+
+  var table = figma.createTable(numRows, numColumns);
+  table.x = x;
+  table.y = y;
+
+  if (fills) table.fills = normalizeFills(fills);
+
+  if (cells && cells.length > 0) {
+    // Load font from the first cell's text sublayer; it covers all cells in a fresh table.
+    await loadFontForSublayer(table.cellAt(0, 0).text);
+
+    for (var i = 0; i < cells.length; i++) {
+      var spec = cells[i];
+      if (
+        spec.row >= 0 && spec.row < table.numRows &&
+        spec.column >= 0 && spec.column < table.numColumns
+      ) {
+        var cell = table.cellAt(spec.row, spec.column);
+        if (spec.text !== undefined && spec.text !== null) {
+          cell.text.characters = spec.text;
+        }
+        if (spec.fills) {
+          cell.fills = normalizeFills(spec.fills);
+        }
+      }
+    }
+  }
+
+  await attachToParent(table, parentId);
+
+  return { success: true, node: serializeNode(table, 'full') };
+}
+
+async function setTableCell(params) {
+  requireFigJam();
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error('Node not found: ' + params.nodeId);
+  if (node.type !== 'TABLE') {
+    throw new Error('Node ' + params.nodeId + ' is not a table (type: ' + node.type + ')');
+  }
+
+  if (params.row < 0 || params.row >= node.numRows) {
+    throw new Error('row ' + params.row + ' out of bounds (table has ' + node.numRows + ' rows)');
+  }
+  if (params.column < 0 || params.column >= node.numColumns) {
+    throw new Error('column ' + params.column + ' out of bounds (table has ' + node.numColumns + ' columns)');
+  }
+
+  var cell = node.cellAt(params.row, params.column);
+
+  if (params.text !== undefined) {
+    await loadFontForSublayer(cell.text);
+    cell.text.characters = params.text;
+  }
+  if (params.fills) {
+    cell.fills = normalizeFills(params.fills);
+  }
+
+  return { success: true, cell: serializeNode(cell, 'full') };
+}
+
+async function getTableNode(nodeId) {
+  var node = await figma.getNodeByIdAsync(nodeId);
+  if (!node) throw new Error('Node not found: ' + nodeId);
+  if (node.type !== 'TABLE') {
+    throw new Error('Node ' + nodeId + ' is not a table (type: ' + node.type + ')');
+  }
+  return node;
+}
+
+async function insertTableRow(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.insertRow(params.rowIndex);
+  return {
+    success: true,
+    nodeId: table.id,
+    numRows: table.numRows,
+    numColumns: table.numColumns
+  };
+}
+
+async function insertTableColumn(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.insertColumn(params.columnIndex);
+  return {
+    success: true,
+    nodeId: table.id,
+    numRows: table.numRows,
+    numColumns: table.numColumns
+  };
+}
+
+async function removeTableRow(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.removeRow(params.rowIndex);
+  return {
+    success: true,
+    nodeId: table.id,
+    numRows: table.numRows,
+    numColumns: table.numColumns
+  };
+}
+
+async function removeTableColumn(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.removeColumn(params.columnIndex);
+  return {
+    success: true,
+    nodeId: table.id,
+    numRows: table.numRows,
+    numColumns: table.numColumns
+  };
+}
+
+async function resizeTableRow(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.resizeRow(params.rowIndex, params.height);
+  return {
+    success: true,
+    nodeId: table.id,
+    rowIndex: params.rowIndex,
+    height: params.height
+  };
+}
+
+async function resizeTableColumn(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.resizeColumn(params.columnIndex, params.width);
+  return {
+    success: true,
+    nodeId: table.id,
+    columnIndex: params.columnIndex,
+    width: params.width
+  };
+}
+
+async function moveTableRow(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.moveRow(params.fromIndex, params.toIndex);
+  return {
+    success: true,
+    nodeId: table.id,
+    fromIndex: params.fromIndex,
+    toIndex: params.toIndex
+  };
+}
+
+async function moveTableColumn(params) {
+  requireFigJam();
+  var table = await getTableNode(params.nodeId);
+  table.moveColumn(params.fromIndex, params.toIndex);
+  return {
+    success: true,
+    nodeId: table.id,
+    fromIndex: params.fromIndex,
+    toIndex: params.toIndex
+  };
+}
+
+// ---- FigJam: Code Block ------------------------------------
+
+async function createCodeBlock(params) {
+  requireFigJam();
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var code = params.code !== undefined ? params.code : '';
+  var codeLanguage = params.codeLanguage || 'PLAINTEXT';
+  var parentId = params.parentId;
+
+  var block = figma.createCodeBlock();
+  block.x = x;
+  block.y = y;
+  block.code = code;
+  block.codeLanguage = codeLanguage;
+
+  await attachToParent(block, parentId);
+
+  return { success: true, node: serializeNode(block, 'full') };
+}
+
+async function setCodeBlock(params) {
+  requireFigJam();
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) throw new Error('Node not found: ' + params.nodeId);
+  if (node.type !== 'CODE_BLOCK') {
+    throw new Error('Node ' + params.nodeId + ' is not a code block (type: ' + node.type + ')');
+  }
+
+  if (params.code !== undefined) node.code = params.code;
+  if (params.codeLanguage !== undefined) node.codeLanguage = params.codeLanguage;
+
+  return { success: true, node: serializeNode(node, 'full') };
+}
+
+// ---- FigJam: Link Preview (Embed / Link Unfurl) ------------
+
+async function createLinkPreview(params) {
+  requireFigJam();
+  if (!params.url) {
+    var err = new Error('url is required');
+    err.code = 'INVALID_PARAMS';
+    throw err;
+  }
+
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var parentId = params.parentId;
+
+  var node = await figma.createLinkPreviewAsync(params.url);
+  if ('x' in node) {
+    node.x = x;
+    node.y = y;
+  }
+
+  await attachToParent(node, parentId);
+
+  return {
+    success: true,
+    nodeType: node.type,
+    node: serializeNode(node, 'full')
   };
 }

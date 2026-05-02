@@ -3990,6 +3990,128 @@ export async function handleSetLayoutGrids(bridge, args) {
   }
 }
 
+// ============================================================
+// FigJam handlers
+// ============================================================
+
+/**
+ * Standard MCP-shaped wrapper: connection guard + sendCommand + error handling.
+ * Thin handlers that have no extra param validation use this directly.
+ */
+async function runCommand(bridge, command, args) {
+  if (!bridge.isConnected()) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: { code: 'NOT_CONNECTED', message: 'Figma plugin is not connected.' }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+  try {
+    const result = await bridge.sendCommand(command, args);
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          error: { code: error.code || 'UNKNOWN_ERROR', message: error.message }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+}
+
+export async function handleCreateSticky(bridge, args) {
+  return runCommand(bridge, 'create_sticky', args);
+}
+
+export async function handleSetSticky(bridge, args) {
+  return runCommand(bridge, 'set_sticky', args);
+}
+
+export async function handleCreateShapeWithText(bridge, args) {
+  return runCommand(bridge, 'create_shape_with_text', args);
+}
+
+export async function handleSetShapeType(bridge, args) {
+  return runCommand(bridge, 'set_shape_type', args);
+}
+
+export async function handleCreateConnector(bridge, args) {
+  return runCommand(bridge, 'create_connector', args);
+}
+
+export async function handleSetConnector(bridge, args) {
+  return runCommand(bridge, 'set_connector', args);
+}
+
+export async function handleCreateSection(bridge, args) {
+  return runCommand(bridge, 'create_section', args);
+}
+
+export async function handleSetSection(bridge, args) {
+  return runCommand(bridge, 'set_section', args);
+}
+
+export async function handleCreateTable(bridge, args) {
+  return runCommand(bridge, 'create_table', args);
+}
+
+export async function handleSetTableCell(bridge, args) {
+  return runCommand(bridge, 'set_table_cell', args);
+}
+
+export async function handleInsertTableRow(bridge, args) {
+  return runCommand(bridge, 'insert_table_row', args);
+}
+
+export async function handleInsertTableColumn(bridge, args) {
+  return runCommand(bridge, 'insert_table_column', args);
+}
+
+export async function handleRemoveTableRow(bridge, args) {
+  return runCommand(bridge, 'remove_table_row', args);
+}
+
+export async function handleRemoveTableColumn(bridge, args) {
+  return runCommand(bridge, 'remove_table_column', args);
+}
+
+export async function handleResizeTableRow(bridge, args) {
+  return runCommand(bridge, 'resize_table_row', args);
+}
+
+export async function handleResizeTableColumn(bridge, args) {
+  return runCommand(bridge, 'resize_table_column', args);
+}
+
+export async function handleMoveTableRow(bridge, args) {
+  return runCommand(bridge, 'move_table_row', args);
+}
+
+export async function handleMoveTableColumn(bridge, args) {
+  return runCommand(bridge, 'move_table_column', args);
+}
+
+export async function handleCreateCodeBlock(bridge, args) {
+  return runCommand(bridge, 'create_code_block', args);
+}
+
+export async function handleSetCodeBlock(bridge, args) {
+  return runCommand(bridge, 'set_code_block', args);
+}
+
+export async function handleCreateLinkPreview(bridge, args) {
+  return runCommand(bridge, 'create_link_preview', args);
+}
+
 /**
  * Combine components as variants into a component set
  */

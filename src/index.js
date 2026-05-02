@@ -36,7 +36,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(`[FigmaMCP] MCP server running on port ${PORT}. Waiting for Figma plugin connection...`);
+  console.error(`[FigmaMCP] MCP server running, WebSocket bound to port ${bridge.port}. Waiting for Figma plugin connection...`);
 
   // Graceful shutdown helper
   const shutdown = async (reason) => {

@@ -1,13 +1,14 @@
 # Figma MCP Bridge
 
-A Model Context Protocol (MCP) server that enables Claude to read and manipulate Figma documents in real-time through a WebSocket bridge to a Figma plugin.
+A Model Context Protocol (MCP) server that enables Claude to read and manipulate **Figma design files and FigJam files** in real-time through a WebSocket bridge to a Figma plugin.
 
 ## Features
 
-- **63 Figma operations** - Create shapes, modify styles, manage components, variables, pages, and more
-- **Real-time bidirectional communication** - Changes appear instantly in Figma
+- **84 operations** - 63 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews)
+- **Works in both editors** - Auto-detects whether you're in a Figma design file or FigJam, and gates FigJam-only commands accordingly
+- **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
-- **Full Figma API access** - Styles, variables, auto-layout, boolean operations, and more
+- **Full Figma API access** - Styles, variables, auto-layout, boolean operations, plus FigJam diagrams and documentation
 
 ## Architecture
 
@@ -110,11 +111,13 @@ Add to `.claude/settings.local.json`:
 ### Query Commands
 
 #### `figma_server_info`
-Get information about the MCP server including WebSocket port and connection status.
+Get information about the MCP server: package version, WebSocket port, connection state, and connected document info. Useful for confirming which version of the server is running after a code change or upgrade.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | *(none)* | | |
+
+**Returns:** `{ version, port, connected, documentInfo }`
 
 #### `figma_get_context`
 Get the current Figma document context including file info, current page, and selection.
@@ -745,6 +748,259 @@ Clone an entire page including all its contents.
 
 ---
 
+### FigJam Commands
+
+These tools target FigJam-only node types (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews). They return `WRONG_EDITOR` if called against a Figma design file. **Sections (`figma_create_section` / `figma_set_section`) are the exception — they work in both editors.**
+
+#### `figma_create_sticky`
+Create a sticky note. Default size is fixed (240×240); width/height are not configurable. Text is set via the embedded sublayer (font auto-loaded).
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `text` | string | No | | Sticky note body text |
+| `fills` | color | No | | Background color of the sticky |
+| `isWideWidth` | boolean | No | | Use the wide rectangular sticky variant |
+| `authorName` | string | No | | Author display name shown on the sticky |
+| `authorVisible` | boolean | No | | Whether to show the author label |
+| `parentId` | string | No | | Parent node ID (defaults to current page) |
+
+#### `figma_set_sticky`
+Update a sticky note's author label and width variant. Use `figma_set_text` to change the body text.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `STICKY` node ID |
+| `authorName` | string | No | New author name |
+| `authorVisible` | boolean | No | Show or hide the author label |
+| `isWideWidth` | boolean | No | Wide vs square sticky |
+
+#### `figma_create_shape_with_text`
+Create a flowchart shape with embedded text. Use `ROUNDED_RECTANGLE` for processes, `DIAMOND` for decisions, `ENG_DATABASE` for data stores. `cornerRadius` is fixed by `shapeType` and cannot be set.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `width` | number | No | `208` | Width in pixels |
+| `height` | number | No | `208` | Height in pixels |
+| `shapeType` | string | Yes | | See list below |
+| `text` | string | No | | Embedded text content |
+| `fills` | color | No | | Shape fill color |
+| `strokes` | color | No | | Shape stroke color |
+| `strokeWeight` | number | No | | Stroke weight in pixels |
+| `parentId` | string | No | | Parent node ID |
+
+**Shape types (30 values):** `SQUARE`, `ELLIPSE`, `ROUNDED_RECTANGLE`, `DIAMOND`, `TRIANGLE_UP`, `TRIANGLE_DOWN`, `PARALLELOGRAM_RIGHT`, `PARALLELOGRAM_LEFT`, `ENG_DATABASE`, `ENG_QUEUE`, `ENG_FILE`, `ENG_FOLDER`, `TRAPEZOID`, `PREDEFINED_PROCESS`, `SHIELD`, `DOCUMENT_SINGLE`, `DOCUMENT_MULTIPLE`, `MANUAL_INPUT`, `HEXAGON`, `CHEVRON`, `PENTAGON`, `OCTAGON`, `STAR`, `PLUS`, `ARROW_LEFT`, `ARROW_RIGHT`, `SUMMING_JUNCTION`, `OR`, `SPEECH_BUBBLE`, `INTERNAL_STORAGE`.
+
+#### `figma_set_shape_type`
+Change the shape variant of an existing shape-with-text node.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `SHAPE_WITH_TEXT` node ID |
+| `shapeType` | string | Yes | New shape type (see list above) |
+
+#### `figma_create_connector`
+Create an arrow / connector between nodes. Default `endCap` is `ARROW_EQUILATERAL` so connectors look like arrows without configuration. Endpoints can attach via magnets, fixed positions on a node, or be free-floating on the canvas.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `start` | endpoint | No | | Start endpoint (see endpoint shape below) |
+| `end` | endpoint | No | | End endpoint |
+| `lineType` | string | No | `"ELBOWED"` | `ELBOWED`, `STRAIGHT`, or `CURVED` |
+| `startCap` | string | No | `"NONE"` | Decoration at start |
+| `endCap` | string | No | `"ARROW_EQUILATERAL"` | Decoration at end |
+| `text` | string | No | | Center label text |
+| `strokes` | color | No | | Line color |
+| `strokeWeight` | number | No | | Line thickness |
+| `parentId` | string | No | | Parent node ID |
+
+**Endpoint shapes** (one of):
+- `{ nodeId, magnet }` — attach to a node with a magnet (`AUTO`, `TOP`, `LEFT`, `BOTTOM`, `RIGHT`, `CENTER`, `NONE`)
+- `{ nodeId, position: { x, y } }` — attach to a node at a fixed position relative to it
+- `{ position: { x, y } }` — free-floating on canvas at absolute coordinates
+
+**Stroke caps:** `NONE`, `ARROW_EQUILATERAL`, `ARROW_LINES`, `TRIANGLE_FILLED`, `CIRCLE_FILLED`, `DIAMOND_FILLED`.
+
+> **Magnet rule:** `STRAIGHT` connectors only support `CENTER` or `NONE` magnets. `ELBOWED` and `CURVED` accept all six. Validation runs server-side.
+
+#### `figma_set_connector`
+Modify an existing connector's endpoints, line type, end caps, or label.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `CONNECTOR` node ID |
+| `start` | endpoint | No | Replacement start endpoint |
+| `end` | endpoint | No | Replacement end endpoint |
+| `lineType` | string | No | New line routing type |
+| `startCap` | string | No | New start decoration |
+| `endCap` | string | No | New end decoration |
+| `text` | string | No | Replacement label text |
+
+#### `figma_create_section`
+Create a labeled section. **Works in both Figma design files and FigJam.** Supports Dev Mode handoff status.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `width` | number | No | `600` | Width in pixels |
+| `height` | number | No | `400` | Height in pixels |
+| `name` | string | No | | Section label |
+| `fills` | color | No | | Section background fill |
+| `sectionContentsHidden` | boolean | No | | Visually collapse the section's contents |
+| `devStatus` | string | No | | `READY_FOR_DEV` or `COMPLETED` (only valid directly under a page or another section) |
+| `devStatusDescription` | string | No | | Optional description shown with the dev status |
+| `parentId` | string | No | | Parent node ID |
+
+#### `figma_set_section`
+Update a section's name, dev status, or content visibility. Pass `devStatus: null` to clear it.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `SECTION` node ID |
+| `name` | string | No | New section label |
+| `sectionContentsHidden` | boolean | No | Show or hide section contents |
+| `devStatus` | string\|null | No | `READY_FOR_DEV`, `COMPLETED`, or `null` |
+| `devStatusDescription` | string | No | Description shown with dev status |
+
+#### `figma_create_table`
+Create a table for documentation or structured data. Optionally seed initial cell content.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `numRows` | number | No | `2` | Number of rows |
+| `numColumns` | number | No | `2` | Number of columns |
+| `cells` | array | No | | Initial cells: `[{ row, column, text?, fills? }]` |
+| `fills` | color | No | | Table background fill |
+| `parentId` | string | No | | Parent node ID |
+
+#### `figma_set_table_cell`
+Set the text and/or fill color of a single table cell.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `TABLE` node ID |
+| `row` | number | Yes | Row index (0-based) |
+| `column` | number | Yes | Column index (0-based) |
+| `text` | string | No | New cell text |
+| `fills` | color | No | New cell background fill |
+
+#### `figma_insert_table_row` / `figma_insert_table_column`
+Insert a row/column at the given index (existing rows/columns at and after the index shift).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `TABLE` node ID |
+| `rowIndex` / `columnIndex` | number | Yes | Insert position (0 = top/leftmost) |
+
+#### `figma_remove_table_row` / `figma_remove_table_column`
+Remove a row/column.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `TABLE` node ID |
+| `rowIndex` / `columnIndex` | number | Yes | Index to remove |
+
+#### `figma_resize_table_row` / `figma_resize_table_column`
+Set row height / column width.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `TABLE` node ID |
+| `rowIndex` / `columnIndex` | number | Yes | Target index |
+| `height` (row) / `width` (column) | number | Yes | New dimension in pixels |
+
+#### `figma_move_table_row` / `figma_move_table_column`
+Reorder rows/columns.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `TABLE` node ID |
+| `fromIndex` | number | Yes | Source index |
+| `toIndex` | number | Yes | Destination index |
+
+#### `figma_create_code_block`
+Create a syntax-highlighted code block for documentation.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `code` | string | Yes | | Code text content |
+| `codeLanguage` | string | No | `"PLAINTEXT"` | Syntax highlighting language |
+| `parentId` | string | No | | Parent node ID |
+
+**Languages (17 values):** `TYPESCRIPT`, `CPP`, `RUBY`, `CSS`, `JAVASCRIPT`, `HTML`, `JSON`, `GRAPHQL`, `PYTHON`, `GO`, `SQL`, `SWIFT`, `KOTLIN`, `RUST`, `BASH`, `PLAINTEXT`, `DART`.
+
+#### `figma_set_code_block`
+Update an existing code block's code text or language.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | The `CODE_BLOCK` node ID |
+| `code` | string | No | New code text |
+| `codeLanguage` | string | No | New syntax-highlighting language |
+
+#### `figma_create_link_preview`
+Create a rich link preview from a URL. Returns either an `EMBED` (iframe; works for OEmbed providers like YouTube/Spotify) or a `LINK_UNFURL` (rich card from OpenGraph/Twitter Card metadata) — the response includes `nodeType` so callers know which.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `url` | string | Yes | | The URL to preview |
+| `parentId` | string | No | | Parent node ID |
+
+#### Building a flowchart end-to-end
+
+```javascript
+// 1. Section to wrap the diagram
+figma_create_section({ x: 0, y: 0, width: 1000, height: 600, name: "User signup flow" })
+// → returns { node: { id: 'XX:1', ... } }
+
+// 2. Process steps as shapes-with-text
+figma_create_shape_with_text({
+  x: 40, y: 80, width: 200, height: 80,
+  shapeType: 'ROUNDED_RECTANGLE',
+  text: 'Start',
+  parentId: 'XX:1'
+})
+figma_create_shape_with_text({
+  x: 320, y: 80, width: 200, height: 120,
+  shapeType: 'DIAMOND',
+  text: 'Email valid?',
+  parentId: 'XX:1'
+})
+// ...etc.
+
+// 3. Connectors between them
+figma_create_connector({
+  start: { nodeId: 'XX:2', magnet: 'AUTO' },
+  end:   { nodeId: 'XX:3', magnet: 'AUTO' },
+  lineType: 'ELBOWED',
+  parentId: 'XX:1'
+})
+// endCap defaults to ARROW_EQUILATERAL — you get an arrow without specifying
+
+// 4. Add a sticky for context
+figma_create_sticky({
+  x: 600, y: 80,
+  text: 'TODO: rate-limit this endpoint',
+  parentId: 'XX:1'
+})
+```
+
+#### FigJam node types not creatable via this MCP
+
+`STAMP`, `HIGHLIGHT`, `WASHI_TAPE`, `WIDGET`, and `MEDIA` cannot be created from a non-widget plugin (Figma's API doesn't expose factory methods, or requires a pre-uploaded image hash). They can still be cloned, moved, deleted, and serialized through existing tools — they just can't be created from scratch.
+
+---
+
 ### Structure Commands
 
 #### `figma_reparent_nodes`
@@ -863,27 +1119,27 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 ### Plugin Not Connecting
 
-1. Ensure the MCP server is running
-2. Check the port: default is 3055, or set `FIGMA_BRIDGE_PORT`
-3. Restart the plugin in Figma
-4. Click "Reconnect" in the plugin UI
+1. Ensure the MCP server is running.
+2. **Ask Claude what port the bridge is on** — the MCP server tells Claude its actual WebSocket port via the `instructions` field on session init, and Claude will surface it proactively when `figma_get_context` reports `connected: false`. You can also call `figma_server_info` directly to see the port.
+3. Match that port in the Figma plugin UI's port input.
+4. Re-run the plugin in Figma (`Cmd+Option+P`).
 
 ### Port Already in Use
 
-The server automatically tries ports 3055-3070. To use a specific port:
+The server automatically tries ports 3055–3070 in order. The actual bound port may differ from the default if you have multiple sessions running. To force a specific port:
 ```bash
 FIGMA_BRIDGE_PORT=3057 node src/index.js
 ```
 
 ### Multiple Claude Code Instances
 
-Each Claude Code instance can work with a different Figma file by using different ports:
+Each Claude Code instance spawns its own MCP server, and each binds to the next available port in the 3055–3070 range. The bridge handles this automatically:
 
-1. **First instance:** Use default port 3055
-2. **Second instance:** Set `FIGMA_BRIDGE_PORT=3056`
-3. **In Figma plugin:** Change the port number in the plugin UI to match
+1. Start as many Claude Code sessions as you want — each picks an open port.
+2. **Ask Claude in each session what port it's on** (or call `figma_server_info`). The MCP server's instructions tell Claude to surface this when not connected.
+3. **In each Figma file's plugin instance:** type the matching port number and click Connect.
 
-The plugin UI has a port input field - just change it to connect to a different MCP server.
+You can confirm which version + port a given session is on with `figma_server_info` — it returns `{ version, port, connected, documentInfo }`.
 
 ### Commands Timing Out
 

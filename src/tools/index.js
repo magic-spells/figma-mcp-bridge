@@ -3,6 +3,9 @@
  */
 
 import { z } from 'zod';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { handleGetContext } from './context.js';
 import { handleListPages } from './pages.js';
 import { handleGetNodes } from './nodes.js';
@@ -82,8 +85,40 @@ import {
   handleDuplicatePage,
   handleSetRotation,
   handleSetLayoutGrids,
-  handleCombineAsVariants
+  handleCombineAsVariants,
+  // FigJam commands
+  handleCreateSticky,
+  handleSetSticky,
+  handleCreateShapeWithText,
+  handleSetShapeType,
+  handleCreateConnector,
+  handleSetConnector,
+  handleCreateSection,
+  handleSetSection,
+  handleCreateTable,
+  handleSetTableCell,
+  handleInsertTableRow,
+  handleInsertTableColumn,
+  handleRemoveTableRow,
+  handleRemoveTableColumn,
+  handleResizeTableRow,
+  handleResizeTableColumn,
+  handleMoveTableRow,
+  handleMoveTableColumn,
+  handleCreateCodeBlock,
+  handleSetCodeBlock,
+  handleCreateLinkPreview
 } from './mutations.js';
+
+// Read package.json once at module load — used by figma_server_info to surface the running version
+const __dirname = dirname(fileURLToPath(import.meta.url));
+let pkgVersion = 'unknown';
+try {
+  const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8'));
+  pkgVersion = pkg.version;
+} catch (_) {
+  // package.json not found — fall back to 'unknown'
+}
 
 // Color schema for fill/stroke shorthand
 const colorSchema = z.union([
@@ -99,6 +134,46 @@ const colorSchema = z.union([
   z.array(z.any()).describe('Full Figma fills array')
 ]);
 
+// ============================================================
+// FigJam shared enums
+// ============================================================
+
+const SHAPE_TYPES = [
+  'SQUARE', 'ELLIPSE', 'ROUNDED_RECTANGLE', 'DIAMOND',
+  'TRIANGLE_UP', 'TRIANGLE_DOWN',
+  'PARALLELOGRAM_RIGHT', 'PARALLELOGRAM_LEFT',
+  'ENG_DATABASE', 'ENG_QUEUE', 'ENG_FILE', 'ENG_FOLDER',
+  'TRAPEZOID', 'PREDEFINED_PROCESS', 'SHIELD',
+  'DOCUMENT_SINGLE', 'DOCUMENT_MULTIPLE', 'MANUAL_INPUT',
+  'HEXAGON', 'CHEVRON', 'PENTAGON', 'OCTAGON', 'STAR', 'PLUS',
+  'ARROW_LEFT', 'ARROW_RIGHT',
+  'SUMMING_JUNCTION', 'OR',
+  'SPEECH_BUBBLE', 'INTERNAL_STORAGE'
+];
+
+const CONNECTOR_LINE_TYPES = ['ELBOWED', 'STRAIGHT', 'CURVED'];
+const CONNECTOR_STROKE_CAPS = [
+  'NONE', 'ARROW_EQUILATERAL', 'ARROW_LINES',
+  'TRIANGLE_FILLED', 'CIRCLE_FILLED', 'DIAMOND_FILLED'
+];
+const MAGNETS = ['NONE', 'AUTO', 'TOP', 'LEFT', 'BOTTOM', 'RIGHT', 'CENTER'];
+const CODE_LANGUAGES = [
+  'TYPESCRIPT', 'CPP', 'RUBY', 'CSS', 'JAVASCRIPT', 'HTML',
+  'JSON', 'GRAPHQL', 'PYTHON', 'GO', 'SQL', 'SWIFT',
+  'KOTLIN', 'RUST', 'BASH', 'PLAINTEXT', 'DART'
+];
+
+// Endpoint spec for figma_create_connector / figma_set_connector.
+// One of: { nodeId, magnet }, { nodeId, position }, { position }.
+const connectorEndpointSchema = z.object({
+  nodeId: z.string().optional().describe('ID of the node this endpoint attaches to. Omit for a free-floating endpoint.'),
+  magnet: z.enum(MAGNETS).optional().describe('Where on the target node the connector attaches. AUTO is recommended; STRAIGHT lines only support CENTER or NONE.'),
+  position: z.object({
+    x: z.number(),
+    y: z.number()
+  }).optional().describe('Fixed position. Relative to the target node when nodeId is set; absolute canvas coordinates otherwise.')
+});
+
 /**
  * Register all tools with the MCP server
  * @param {McpServer} server - MCP Server instance
@@ -109,15 +184,16 @@ export function registerTools(server, bridge) {
   // Server Info
   // ============================================================
 
-  // figma_server_info - Get MCP server info including port
+  // figma_server_info - Get MCP server info including port and version
   server.tool(
     'figma_server_info',
-    'Get information about the MCP server including the WebSocket port it is running on.',
+    'Get information about the MCP server: package version, WebSocket port, connection state, and connected document info.',
     {},
     async () => ({
       content: [{
         type: 'text',
         text: JSON.stringify({
+          version: pkgVersion,
           port: bridge.port,
           connected: bridge.isConnected(),
           documentInfo: bridge.getDocumentInfo()
@@ -1147,4 +1223,304 @@ export function registerTools(server, bridge) {
   //   },
   //   async (args) => handleSetLayoutGrids(bridge, args)
   // );
+
+  // ============================================================
+  // FigJam Tools
+  // ============================================================
+  // These commands target FigJam-only node types (sticky notes, flowchart shapes,
+  // connectors, tables, code blocks, link previews). Most return WRONG_EDITOR
+  // when called outside a FigJam file. Sections work in both Figma and FigJam.
+
+  // figma_create_sticky - Create a sticky note
+  server.tool(
+    'figma_create_sticky',
+    'FigJam: create a sticky note. Default size is fixed (240×240); width/height are not configurable. Text is set via the embedded sublayer (font auto-loaded).',
+    {
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      text: z.string().optional().describe('Sticky note body text'),
+      fills: colorSchema.optional().describe('Background color of the sticky'),
+      isWideWidth: z.boolean().optional().describe('Use the wide rectangular sticky variant'),
+      authorName: z.string().optional().describe('Author display name shown on the sticky'),
+      authorVisible: z.boolean().optional().describe('Whether to show the author label'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateSticky(bridge, args)
+  );
+
+  // figma_set_sticky - Update a sticky's metadata
+  server.tool(
+    'figma_set_sticky',
+    'FigJam: update a sticky note\'s author label and width variant. Use figma_set_text to change the body text.',
+    {
+      nodeId: z.string().describe('The STICKY node ID'),
+      authorName: z.string().optional().describe('New author name'),
+      authorVisible: z.boolean().optional().describe('Show or hide the author label'),
+      isWideWidth: z.boolean().optional().describe('Wide vs square sticky')
+    },
+    async (args) => handleSetSticky(bridge, args)
+  );
+
+  // figma_create_shape_with_text - Create a flowchart shape with embedded text
+  server.tool(
+    'figma_create_shape_with_text',
+    'FigJam: create a flowchart shape with embedded text (process box, decision diamond, database cylinder, etc.). 30 shape types are available — use ROUNDED_RECTANGLE for processes, DIAMOND for decisions, ENG_DATABASE for data stores. cornerRadius is fixed and cannot be set.',
+    {
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      width: z.number().optional().default(208).describe('Width in pixels'),
+      height: z.number().optional().default(208).describe('Height in pixels'),
+      shapeType: z.enum(SHAPE_TYPES).describe('Shape variety: SQUARE, ELLIPSE, ROUNDED_RECTANGLE, DIAMOND, TRIANGLE_UP/DOWN, PARALLELOGRAM_RIGHT/LEFT, ENG_DATABASE, ENG_QUEUE, ENG_FILE, ENG_FOLDER, TRAPEZOID, PREDEFINED_PROCESS, SHIELD, DOCUMENT_SINGLE/MULTIPLE, MANUAL_INPUT, HEXAGON, CHEVRON, PENTAGON, OCTAGON, STAR, PLUS, ARROW_LEFT/RIGHT, SUMMING_JUNCTION, OR, SPEECH_BUBBLE, INTERNAL_STORAGE'),
+      text: z.string().optional().describe('Embedded text content (font auto-loaded)'),
+      fills: colorSchema.optional().describe('Shape fill color'),
+      strokes: colorSchema.optional().describe('Shape stroke color'),
+      strokeWeight: z.number().optional().describe('Stroke weight in pixels'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateShapeWithText(bridge, args)
+  );
+
+  // figma_set_shape_type - Change the shape variant
+  server.tool(
+    'figma_set_shape_type',
+    'FigJam: change the shape type of an existing shape-with-text node (e.g., turn a ROUNDED_RECTANGLE into a DIAMOND).',
+    {
+      nodeId: z.string().describe('The SHAPE_WITH_TEXT node ID'),
+      shapeType: z.enum(SHAPE_TYPES).describe('New shape type')
+    },
+    async (args) => handleSetShapeType(bridge, args)
+  );
+
+  // figma_create_connector - Create an arrow/connector between nodes
+  server.tool(
+    'figma_create_connector',
+    'FigJam: create a connector (arrow line) between two nodes for flowcharts and diagrams. Endpoints can attach to nodes via magnets (AUTO recommended), to fixed positions on nodes, or be free-floating on the canvas. Default end cap is ARROW_EQUILATERAL so it looks like an arrow without configuration. ELBOWED is best for orthogonal flowcharts; STRAIGHT only supports CENTER/NONE magnets.',
+    {
+      start: connectorEndpointSchema.optional().describe('Start endpoint: { nodeId, magnet } | { nodeId, position } | { position }'),
+      end: connectorEndpointSchema.optional().describe('End endpoint: { nodeId, magnet } | { nodeId, position } | { position }'),
+      lineType: z.enum(CONNECTOR_LINE_TYPES).optional().default('ELBOWED').describe('Line routing: ELBOWED (right angles), STRAIGHT, or CURVED'),
+      startCap: z.enum(CONNECTOR_STROKE_CAPS).optional().default('NONE').describe('Decoration at start endpoint'),
+      endCap: z.enum(CONNECTOR_STROKE_CAPS).optional().default('ARROW_EQUILATERAL').describe('Decoration at end endpoint (default arrow)'),
+      text: z.string().optional().describe('Center label text on the connector'),
+      strokes: colorSchema.optional().describe('Line color'),
+      strokeWeight: z.number().optional().describe('Line thickness in pixels'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateConnector(bridge, args)
+  );
+
+  // figma_set_connector - Update an existing connector
+  server.tool(
+    'figma_set_connector',
+    'FigJam: modify an existing connector\'s endpoints, line type, end caps, or label.',
+    {
+      nodeId: z.string().describe('The CONNECTOR node ID'),
+      start: connectorEndpointSchema.optional().describe('Replacement start endpoint'),
+      end: connectorEndpointSchema.optional().describe('Replacement end endpoint'),
+      lineType: z.enum(CONNECTOR_LINE_TYPES).optional().describe('New line routing type'),
+      startCap: z.enum(CONNECTOR_STROKE_CAPS).optional().describe('New start decoration'),
+      endCap: z.enum(CONNECTOR_STROKE_CAPS).optional().describe('New end decoration'),
+      text: z.string().optional().describe('Replacement label text')
+    },
+    async (args) => handleSetConnector(bridge, args)
+  );
+
+  // figma_create_section - Create a labeled section (works in Figma and FigJam)
+  server.tool(
+    'figma_create_section',
+    'Create a labeled section. Sections work in BOTH Figma design files and FigJam — use them to group flowcharts, diagrams, or design areas. Supports dev status (READY_FOR_DEV/COMPLETED) for handoff.',
+    {
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      width: z.number().optional().default(600).describe('Width in pixels'),
+      height: z.number().optional().default(400).describe('Height in pixels'),
+      name: z.string().optional().describe('Section label'),
+      fills: colorSchema.optional().describe('Section background fill'),
+      sectionContentsHidden: z.boolean().optional().describe('Visually collapse the section\'s contents'),
+      devStatus: z.enum(['READY_FOR_DEV', 'COMPLETED']).optional().describe('Dev Mode handoff status (only valid on sections directly under a page or another section)'),
+      devStatusDescription: z.string().optional().describe('Optional description shown with the dev status'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateSection(bridge, args)
+  );
+
+  // figma_set_section - Update a section
+  server.tool(
+    'figma_set_section',
+    'Update a section\'s name, dev status, or content visibility. Pass devStatus: null to clear.',
+    {
+      nodeId: z.string().describe('The SECTION node ID'),
+      name: z.string().optional().describe('New section label'),
+      sectionContentsHidden: z.boolean().optional().describe('Show or hide section contents'),
+      devStatus: z.enum(['READY_FOR_DEV', 'COMPLETED']).nullable().optional().describe('Set dev status, or null to clear'),
+      devStatusDescription: z.string().optional().describe('Description shown with dev status')
+    },
+    async (args) => handleSetSection(bridge, args)
+  );
+
+  // figma_create_table - Create a table
+  server.tool(
+    'figma_create_table',
+    'FigJam: create a table for documentation or structured data. Optionally seed initial cell content via the cells array. Defaults to 2×2.',
+    {
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      numRows: z.number().int().min(1).optional().default(2).describe('Number of rows'),
+      numColumns: z.number().int().min(1).optional().default(2).describe('Number of columns'),
+      cells: z.array(z.object({
+        row: z.number().int().min(0).describe('Row index (0-based)'),
+        column: z.number().int().min(0).describe('Column index (0-based)'),
+        text: z.string().optional().describe('Cell text content'),
+        fills: colorSchema.optional().describe('Cell background fill')
+      })).optional().describe('Initial cell content. Cells outside the table bounds are silently ignored.'),
+      fills: colorSchema.optional().describe('Table background fill'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateTable(bridge, args)
+  );
+
+  // figma_set_table_cell - Set the text/fill of a table cell
+  server.tool(
+    'figma_set_table_cell',
+    'FigJam: set the text and/or fill color of a single table cell.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      row: z.number().int().min(0).describe('Row index (0-based)'),
+      column: z.number().int().min(0).describe('Column index (0-based)'),
+      text: z.string().optional().describe('New cell text'),
+      fills: colorSchema.optional().describe('New cell background fill')
+    },
+    async (args) => handleSetTableCell(bridge, args)
+  );
+
+  // figma_insert_table_row - Insert a row before the given index
+  server.tool(
+    'figma_insert_table_row',
+    'FigJam: insert a row at the given index (existing rows at and after the index shift down).',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      rowIndex: z.number().int().min(0).describe('Insert position (0 = top)')
+    },
+    async (args) => handleInsertTableRow(bridge, args)
+  );
+
+  // figma_insert_table_column - Insert a column before the given index
+  server.tool(
+    'figma_insert_table_column',
+    'FigJam: insert a column at the given index (existing columns at and after the index shift right).',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      columnIndex: z.number().int().min(0).describe('Insert position (0 = leftmost)')
+    },
+    async (args) => handleInsertTableColumn(bridge, args)
+  );
+
+  // figma_remove_table_row - Remove a row
+  server.tool(
+    'figma_remove_table_row',
+    'FigJam: remove the row at the given index.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      rowIndex: z.number().int().min(0).describe('Row to remove')
+    },
+    async (args) => handleRemoveTableRow(bridge, args)
+  );
+
+  // figma_remove_table_column - Remove a column
+  server.tool(
+    'figma_remove_table_column',
+    'FigJam: remove the column at the given index.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      columnIndex: z.number().int().min(0).describe('Column to remove')
+    },
+    async (args) => handleRemoveTableColumn(bridge, args)
+  );
+
+  // figma_resize_table_row - Set row height
+  server.tool(
+    'figma_resize_table_row',
+    'FigJam: set the height of a table row.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      rowIndex: z.number().int().min(0).describe('Row index'),
+      height: z.number().min(1).describe('New height in pixels')
+    },
+    async (args) => handleResizeTableRow(bridge, args)
+  );
+
+  // figma_resize_table_column - Set column width
+  server.tool(
+    'figma_resize_table_column',
+    'FigJam: set the width of a table column.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      columnIndex: z.number().int().min(0).describe('Column index'),
+      width: z.number().min(1).describe('New width in pixels')
+    },
+    async (args) => handleResizeTableColumn(bridge, args)
+  );
+
+  // figma_move_table_row - Reorder rows
+  server.tool(
+    'figma_move_table_row',
+    'FigJam: move a row from one index to another.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      fromIndex: z.number().int().min(0).describe('Source row index'),
+      toIndex: z.number().int().min(0).describe('Destination row index')
+    },
+    async (args) => handleMoveTableRow(bridge, args)
+  );
+
+  // figma_move_table_column - Reorder columns
+  server.tool(
+    'figma_move_table_column',
+    'FigJam: move a column from one index to another.',
+    {
+      nodeId: z.string().describe('The TABLE node ID'),
+      fromIndex: z.number().int().min(0).describe('Source column index'),
+      toIndex: z.number().int().min(0).describe('Destination column index')
+    },
+    async (args) => handleMoveTableColumn(bridge, args)
+  );
+
+  // figma_create_code_block - Create a syntax-highlighted code block
+  server.tool(
+    'figma_create_code_block',
+    'FigJam: create a syntax-highlighted code block for documentation. Code is a plain string property (no font loading required).',
+    {
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      code: z.string().describe('The code text content'),
+      codeLanguage: z.enum(CODE_LANGUAGES).optional().default('PLAINTEXT').describe('Syntax highlighting language'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateCodeBlock(bridge, args)
+  );
+
+  // figma_set_code_block - Update a code block
+  server.tool(
+    'figma_set_code_block',
+    'FigJam: update an existing code block\'s code text or language.',
+    {
+      nodeId: z.string().describe('The CODE_BLOCK node ID'),
+      code: z.string().optional().describe('New code text'),
+      codeLanguage: z.enum(CODE_LANGUAGES).optional().describe('New syntax-highlighting language')
+    },
+    async (args) => handleSetCodeBlock(bridge, args)
+  );
+
+  // figma_create_link_preview - Embed a URL (auto-detects iframe vs. card)
+  server.tool(
+    'figma_create_link_preview',
+    'FigJam: create a rich link preview from a URL. Returns either an EMBED (iframe; works for OEmbed providers like YouTube/Spotify) or a LINK_UNFURL (rich card from OpenGraph/Twitter Card metadata) — the response includes nodeType so you know which.',
+    {
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      url: z.string().describe('The URL to preview'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateLinkPreview(bridge, args)
+  );
 }

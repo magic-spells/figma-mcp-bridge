@@ -1,6 +1,6 @@
 # Figma MCP Bridge - Developer Guide
 
-MCP server enabling Claude to read and manipulate Figma documents via WebSocket bridge to a Figma plugin.
+MCP server enabling Claude to read and manipulate **Figma design files AND FigJam files** via WebSocket bridge to a Figma plugin. Supports flowcharts, diagrams, sticky notes, tables, code blocks, and link previews in FigJam alongside the full Figma design toolset.
 
 ## Tech Stack
 - Node.js (ES modules)
@@ -23,11 +23,11 @@ src/
 ├── server.js          # MCP server setup (McpServer configuration)
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (63 tools)
+    ├── index.js       # Tool registration with Zod schemas (84 tools — 63 Figma + 21 FigJam)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
-    └── mutations.js   # All mutation handlers (~60 functions)
+    └── mutations.js   # All mutation handlers (Figma + FigJam)
 
 plugin/
 ├── manifest.json      # Figma plugin configuration
@@ -83,6 +83,62 @@ case 'new_command':
   // Perform operation...
   return { success: true, nodeId: node.id };
 ```
+
+### Adding a FigJam-only command
+
+For commands that only make sense in FigJam (sticky notes, shapes-with-text, connectors, tables, code blocks, link previews), use the `requireFigJam()` guard at the top of the plugin handler:
+
+```javascript
+async function createSticky(params) {
+  requireFigJam();  // throws WRONG_EDITOR if running in a Figma design file
+  var sticky = figma.createSticky();
+  // ...
+  await attachToParent(sticky, params.parentId);  // shared helper for parent attachment
+  return { success: true, node: serializeNode(sticky, 'full') };
+}
+```
+
+For text on FigJam sublayer-bearing nodes (`STICKY`, `SHAPE_WITH_TEXT`, `CONNECTOR`, `TABLE_CELL`), use the `loadFontForSublayer()` helper rather than reaching into `node.fontName`:
+
+```javascript
+await loadFontForSublayer(sticky.text);
+sticky.text.characters = 'Hello';
+```
+
+For connectors, build endpoints with `buildConnectorEndpoint()` and validate with `validateConnectorMagnet()`:
+
+```javascript
+var startEndpoint = buildConnectorEndpoint(params.start);  // accepts { nodeId, magnet } | { nodeId, position } | { position }
+validateConnectorMagnet(lineType, startEndpoint);          // STRAIGHT lines only allow CENTER/NONE magnets
+```
+
+`createSection` is the one exception — sections work in both editors, so it does NOT call `requireFigJam()`.
+
+## FigJam Tools Overview
+
+| Tool | Creates / modifies | Notes |
+|------|--------------------|-------|
+| `figma_create_sticky` | `STICKY` | Width/height fixed; `text` is sublayer |
+| `figma_set_sticky` | `STICKY` | author/wide-width meta only |
+| `figma_create_shape_with_text` | `SHAPE_WITH_TEXT` | 30 `shapeType` values (ROUNDED_RECTANGLE, DIAMOND, ENG_DATABASE, …); `cornerRadius` is readonly |
+| `figma_set_shape_type` | `SHAPE_WITH_TEXT` | Change shape variant |
+| `figma_create_connector` | `CONNECTOR` | `start`/`end` endpoints, `lineType` (ELBOWED/STRAIGHT/CURVED), default `endCap: ARROW_EQUILATERAL` |
+| `figma_set_connector` | `CONNECTOR` | Modify endpoints/caps/text after creation |
+| `figma_create_section` | `SECTION` | **Works in both editors**; supports `devStatus` (READY_FOR_DEV/COMPLETED) |
+| `figma_set_section` | `SECTION` | name, contents-hidden, devStatus |
+| `figma_create_table` | `TABLE` | Optional `cells: [{ row, column, text }]` to seed content |
+| `figma_set_table_cell` | `TABLE` | Set cell text/fill |
+| `figma_insert_table_row` / `_column` | `TABLE` | Inserts BEFORE the given index |
+| `figma_remove_table_row` / `_column` | `TABLE` | Remove row/column |
+| `figma_resize_table_row` / `_column` | `TABLE` | Set row height / column width |
+| `figma_move_table_row` / `_column` | `TABLE` | Reorder |
+| `figma_create_code_block` | `CODE_BLOCK` | 17 `codeLanguage` values; `code` is plain string (no font load) |
+| `figma_set_code_block` | `CODE_BLOCK` | Update code/language |
+| `figma_create_link_preview` | `EMBED` or `LINK_UNFURL` | OEmbed URL → EMBED, others → LINK_UNFURL; response includes `nodeType` |
+
+`figma_set_text` and `figma_set_text_style` were extended to handle the four sublayer-bearing FigJam node types (sticky, shape-with-text, connector, table cell) — call them with the parent node's id.
+
+**FigJam-only node types we deliberately do NOT wrap creation for:** `STAMP`, `HIGHLIGHT`, `WASHI_TAPE`, `WIDGET`, `MEDIA`. Figma's API gives no factory method for these from a non-widget plugin (or requires a pre-uploaded image hash). They can still be cloned, moved, deleted, and serialized (they get `stuckTo` exposed) — just not created from scratch.
 
 ## Token Optimization
 
@@ -210,6 +266,30 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 13. **Reordering nodes** - Use `parent.appendChild(node)` for front, `parent.insertChild(0, node)` for back (children array is read-only)
 
 14. **`mainComponent` is async** - Use `getMainComponentAsync()` for instances (currently skipped in serialization)
+
+## FigJam Constraints
+
+15. **Text on FigJam nodes is a `TextSublayer`, not a child node** - `STICKY`, `SHAPE_WITH_TEXT`, `CONNECTOR`, and `TABLE_CELL` all use `node.text.characters` (not `node.characters`) and `node.text.fontName`. The sublayer is NOT in the scene graph and has no `id`. Use `loadFontForSublayer(node.text)` rather than `figma.loadFontAsync(node.fontName)`.
+
+16. **`textAlignVertical` and `textAutoResize` cannot be set on TextSublayer** - `figma_set_text_style` rejects these on FigJam nodes with a clear error.
+
+17. **`StickyNode` `width`/`height` are readonly** - Don't try to `resize()` a sticky. The `isWideWidth` boolean toggles between square (240×240) and wide variants.
+
+18. **`ShapeWithTextNode.cornerRadius` is readonly** - Set `shapeType: 'ROUNDED_RECTANGLE'` instead. The shape's geometry handles the radius.
+
+19. **Connector magnet rules** - `STRAIGHT` connectors only accept `CENTER` or `NONE` magnets. `ELBOWED`/`CURVED` accept all six (`AUTO`, `TOP`, `LEFT`, `BOTTOM`, `RIGHT`, `CENTER`). The `validateConnectorMagnet(lineType, endpoint)` helper enforces this.
+
+20. **Connectors have no fills, only strokes** - The `serializeNode` fills/strokes/effects/opacity reads were decoupled (each property is checked individually) so connectors get strokes serialized correctly.
+
+21. **`figma.createLinkPreviewAsync()` returns either `EmbedNode` or `LinkUnfurlNode`** - OEmbed-supporting URLs (YouTube, Spotify) → `EMBED`; everything else → `LINK_UNFURL` from OG/Twitter Card metadata. The `figma_create_link_preview` response includes `nodeType` so callers know which.
+
+22. **`devStatus` on `SectionNode` only valid directly under a page or section** - Cannot be set on a section nested inside a node that already has a `devStatus`. The handler swallows the error into a `devStatusError` field on the response rather than failing the create.
+
+23. **`getTopLevelFrame()` throws in FigJam** - Never call it in serialization for FigJam node types. Use `getPageForNode()` instead (already in `plugin/code.js`).
+
+24. **Stamps/Highlights/WashiTape/Widgets cannot be created from plugins** - Only cloned from existing user-placed instances. They serialize their `stuckTo` node ID for inspection.
+
+25. **`editorType` is exposed in `figma_get_context`** - Returns `"figma"` or `"figjam"`. The `requireFigJam()` plugin helper guards FigJam-only commands; `WRONG_EDITOR` is the standard error code.
 
 ## Running the Server
 

@@ -3,18 +3,51 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { registerTools } from './tools/index.js';
+
+// Read package.json once at module load so version stays in sync with the published artifact
+const __dirname = dirname(fileURLToPath(import.meta.url));
+let pkgVersion = '0.0.0';
+try {
+  const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
+  pkgVersion = pkg.version;
+} catch (_) {
+  // Fall back to placeholder if package.json can't be read
+}
 
 /**
  * Create and configure the MCP server
- * @param {FigmaBridge} bridge - Figma bridge instance
+ * @param {FigmaBridge} bridge - Figma bridge instance (must be started — bridge.port must reflect the bound port)
  * @returns {McpServer} Configured MCP server
  */
 export function createServer(bridge) {
+  const port = bridge.port;
   const server = new McpServer({
     name: 'figma-mcp-bridge',
-    version: '0.1.0',
-    instructions: `# Figma MCP Bridge - Usage Guide
+    version: pkgVersion,
+    instructions: `# Figma MCP Bridge v${pkgVersion}
+
+## CONNECTION INFO — CHECK FIRST
+
+This MCP server is bridging Claude to Figma via a WebSocket on **port ${port}**.
+
+Multiple Claude sessions can run concurrently and the bridge falls back through ports 3055–3070, so the port may differ from the default. **At the start of any new Figma-related conversation, call \`figma_get_context\` to check connection state. If it returns \`connected: false\`, proactively tell the user:**
+
+> "The Figma MCP bridge is running on port **${port}**. Open the Figma plugin and set its port input to **${port}**, then re-run the plugin if it was already open."
+
+Don't make the user discover the port themselves — surface it the first time you notice they aren't connected.
+
+## FigJam Support
+
+This server supports both Figma design files AND FigJam files. FigJam-specific tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) are gated to FigJam files and return a \`WRONG_EDITOR\` error if called against a Figma design file.
+
+For flowcharts in FigJam:
+- \`figma_create_shape_with_text\` with \`shapeType\` (ROUNDED_RECTANGLE for processes, DIAMOND for decisions, ENG_DATABASE for data stores, etc.)
+- \`figma_create_connector\` with \`{ start: { nodeId, magnet: 'AUTO' }, end: { nodeId, magnet: 'AUTO' } }\` — \`endCap\` defaults to \`ARROW_EQUILATERAL\` so connectors look like arrows
+- Wrap the diagram in a \`figma_create_section\` for grouping
 
 ## IMPORTANT: Always Use Search Tools First
 
