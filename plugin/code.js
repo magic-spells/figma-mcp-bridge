@@ -253,6 +253,16 @@ async function handleCommand(command, payload) {
     case 'create_link_preview':
       return await createLinkPreview(payload);
 
+    // Prototype commands
+    case 'get_reactions':
+      return await getReactions(payload);
+    case 'add_reaction':
+      return await addReaction(payload);
+    case 'remove_reaction':
+      return await removeReaction(payload);
+    case 'set_flow_starting_point':
+      return await setFlowStartingPoint(payload);
+
     default:
       throw new Error(`Unknown command: ${command}`);
   }
@@ -4795,4 +4805,168 @@ async function createLinkPreview(params) {
     nodeType: node.type,
     node: serializeNode(node, 'full')
   };
+}
+
+// ============================================================
+// Prototype command implementations
+// ============================================================
+
+async function getReactions(params) {
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) {
+    var err = new Error('Node not found: ' + params.nodeId);
+    err.code = 'NODE_NOT_FOUND';
+    throw err;
+  }
+  if (!('reactions' in node)) {
+    var err2 = new Error('Node type ' + node.type + ' does not support reactions');
+    err2.code = 'INVALID_PARAMS';
+    throw err2;
+  }
+  return { success: true, nodeId: node.id, reactions: node.reactions };
+}
+
+async function addReaction(params) {
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) {
+    var err = new Error('Node not found: ' + params.nodeId);
+    err.code = 'NODE_NOT_FOUND';
+    throw err;
+  }
+  if (!('reactions' in node) || !('setReactionsAsync' in node)) {
+    var err2 = new Error('Node type ' + node.type + ' does not support reactions');
+    err2.code = 'INVALID_PARAMS';
+    throw err2;
+  }
+
+  var trigger = buildTrigger(params.trigger);
+  var action = buildAction(params.action);
+  // Use actions[] (new API); action field is deprecated
+  var newReaction = { trigger: trigger, actions: [action] };
+
+  var existing = node.reactions.map(function(r) { return safeClone(r); });
+  existing.push(newReaction);
+  await node.setReactionsAsync(existing);
+
+  return { success: true, nodeId: node.id, reactions: node.reactions };
+}
+
+async function removeReaction(params) {
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) {
+    var err = new Error('Node not found: ' + params.nodeId);
+    err.code = 'NODE_NOT_FOUND';
+    throw err;
+  }
+  if (!('reactions' in node) || !('setReactionsAsync' in node)) {
+    var err2 = new Error('Node type ' + node.type + ' does not support reactions');
+    err2.code = 'INVALID_PARAMS';
+    throw err2;
+  }
+
+  var idx = params.index;
+  var current = node.reactions.map(function(r) { return safeClone(r); });
+  if (idx < 0 || idx >= current.length) {
+    var err3 = new Error('Reaction index ' + idx + ' out of range (length: ' + current.length + ')');
+    err3.code = 'INVALID_PARAMS';
+    throw err3;
+  }
+  current.splice(idx, 1);
+  await node.setReactionsAsync(current);
+
+  return { success: true, nodeId: node.id, reactions: node.reactions };
+}
+
+async function setFlowStartingPoint(params) {
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  if (!node) {
+    var err = new Error('Node not found: ' + params.nodeId);
+    err.code = 'NODE_NOT_FOUND';
+    throw err;
+  }
+  if (node.type !== 'FRAME' && node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET') {
+    var err2 = new Error('Flow starting points can only be set on FRAME, COMPONENT, or COMPONENT_SET nodes (got ' + node.type + ')');
+    err2.code = 'INVALID_PARAMS';
+    throw err2;
+  }
+
+  // flowStartingPoints is ReadonlyArray — no setter; must use node-level startingPoint property
+  // The correct API: FrameNode.flowStartingPoint (get/set) for the node itself
+  if (params.clear) {
+    node.flowStartingPoint = null;
+    return { success: true, nodeId: node.id, cleared: true };
+  }
+
+  var flowName = params.flowName || 'Flow 1';
+  var fp = { name: flowName };
+  if (params.startingX !== undefined || params.startingY !== undefined) {
+    fp.startingScrollOffset = {
+      x: params.startingX !== undefined ? params.startingX : 0,
+      y: params.startingY !== undefined ? params.startingY : 0
+    };
+  }
+  node.flowStartingPoint = fp;
+
+  return { success: true, nodeId: node.id, flowStartingPoint: node.flowStartingPoint };
+}
+
+// ---- Prototype helpers ----
+
+function buildTrigger(t) {
+  var trigger = { type: t.type };
+  if (t.type === 'AFTER_TIMEOUT') {
+    trigger.timeout = t.timeout !== undefined ? t.timeout : 0;
+  }
+  if (t.type === 'ON_KEY_DOWN') {
+    trigger.device = t.device || 'KEYBOARD';
+    trigger.keyCodes = t.keyCodes || [];
+  }
+  if (t.type === 'ON_MEDIA_HIT') {
+    trigger.mediaHitTime = t.mediaHitTime !== undefined ? t.mediaHitTime : 0;
+  }
+  if (t.type === 'MOUSE_UP' || t.type === 'MOUSE_DOWN') {
+    trigger.delay = t.delay !== undefined ? t.delay : 0;
+  }
+  if (t.type === 'MOUSE_ENTER' || t.type === 'MOUSE_LEAVE') {
+    trigger.delay = t.delay !== undefined ? t.delay : 0;
+    trigger.deprecatedVersion = t.deprecatedVersion !== undefined ? t.deprecatedVersion : false;
+  }
+  return trigger;
+}
+
+function buildAction(a) {
+  // BACK and CLOSE have no extra fields
+  if (a.type === 'BACK' || a.type === 'CLOSE') {
+    return { type: a.type };
+  }
+
+  // URL action
+  if (a.type === 'URL') {
+    return { type: 'URL', url: a.url || '' };
+  }
+
+  // NODE action — covers NAVIGATE, OVERLAY, SCROLL_TO, SWAP, CHANGE_TO via navigation field
+  var action = {
+    type: 'NODE',
+    destinationId: a.destinationId !== undefined ? a.destinationId : null,
+    navigation: a.navigation || 'NAVIGATE',
+    transition: a.transition !== undefined ? buildTransition(a.transition) : null,
+    preserveScrollPosition: a.preserveScrollPosition !== undefined ? a.preserveScrollPosition : false
+  };
+  if (a.overlayRelativePosition !== undefined) {
+    action.overlayRelativePosition = a.overlayRelativePosition;
+  }
+  return action;
+}
+
+function buildTransition(t) {
+  var transition = {
+    type: t.type,
+    duration: t.duration !== undefined ? t.duration : 0.3,
+    easing: t.easing ? Object.assign({}, t.easing) : { type: 'LINEAR' }
+  };
+  if (t.direction !== undefined) {
+    transition.direction = t.direction;
+  }
+  return transition;
 }

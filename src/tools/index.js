@@ -107,7 +107,12 @@ import {
   handleMoveTableColumn,
   handleCreateCodeBlock,
   handleSetCodeBlock,
-  handleCreateLinkPreview
+  handleCreateLinkPreview,
+  // Prototype commands
+  handleGetReactions,
+  handleAddReaction,
+  handleRemoveReaction,
+  handleSetFlowStartingPoint
 } from './mutations.js';
 
 // Read package.json once at module load — used by figma_server_info to surface the running version
@@ -1518,5 +1523,86 @@ export function registerTools(server, bridge) {
       parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
     },
     async (args) => handleCreateLinkPreview(bridge, args)
+  );
+
+  // ---- Prototype tools ----
+
+  // figma_get_reactions - Read all reactions on a node
+  server.tool(
+    'figma_get_reactions',
+    'Prototype: get all reactions (interactions) on a node. Returns the full reactions array with trigger and action details.',
+    {
+      nodeId: z.string().describe('Node ID to read reactions from')
+    },
+    async (args) => handleGetReactions(bridge, args)
+  );
+
+  // figma_add_reaction - Add a prototype interaction to a node
+  server.tool(
+    'figma_add_reaction',
+    'Prototype: add a reaction (interaction) to a node. A reaction pairs a trigger with an action. Existing reactions are preserved.\n\nTrigger types: ON_CLICK, ON_HOVER, ON_PRESS, ON_DRAG, ON_MEDIA_END, AFTER_TIMEOUT, MOUSE_UP, MOUSE_DOWN, MOUSE_ENTER, MOUSE_LEAVE, ON_KEY_DOWN, ON_MEDIA_HIT.\n\nAction types: NODE (navigate/overlay/scroll — set navigation field), BACK, CLOSE, URL.\n\nFor NODE actions, navigation values: NAVIGATE (go to frame), SWAP (replace current frame), OVERLAY (open as overlay), SCROLL_TO (scroll to frame), CHANGE_TO (change component variant).',
+    {
+      nodeId: z.string().describe('Node ID to add the reaction to'),
+      trigger: z.object({
+        type: z.enum([
+          'ON_CLICK', 'ON_HOVER', 'ON_PRESS', 'ON_DRAG', 'ON_MEDIA_END',
+          'AFTER_TIMEOUT', 'MOUSE_UP', 'MOUSE_DOWN', 'MOUSE_ENTER', 'MOUSE_LEAVE',
+          'ON_KEY_DOWN', 'ON_MEDIA_HIT'
+        ]).describe('Trigger type'),
+        timeout: z.number().optional().describe('Delay in ms — required for AFTER_TIMEOUT'),
+        delay: z.number().optional().describe('Delay in ms — for MOUSE_UP, MOUSE_DOWN, MOUSE_ENTER, MOUSE_LEAVE'),
+        deprecatedVersion: z.boolean().optional().describe('For MOUSE_ENTER/MOUSE_LEAVE only'),
+        device: z.enum(['KEYBOARD', 'XBOX_ONE', 'PS4', 'SWITCH_PRO', 'UNKNOWN_CONTROLLER']).optional().describe('Input device — for ON_KEY_DOWN (default: KEYBOARD)'),
+        keyCodes: z.array(z.number()).optional().describe('Key codes — for ON_KEY_DOWN'),
+        mediaHitTime: z.number().optional().describe('Time in seconds — for ON_MEDIA_HIT')
+      }).describe('What triggers the reaction'),
+      action: z.object({
+        type: z.enum(['NODE', 'BACK', 'CLOSE', 'URL']).describe(
+          'Action type. NODE covers all navigation (use navigation field to specify NAVIGATE/OVERLAY/SCROLL_TO/SWAP/CHANGE_TO). BACK goes to previous frame. CLOSE closes overlay. URL opens a URL.'
+        ),
+        destinationId: z.string().optional().describe('Target frame/node ID — for NODE action'),
+        url: z.string().optional().describe('URL string — required for URL action'),
+        navigation: z.enum(['NAVIGATE', 'SWAP', 'OVERLAY', 'SCROLL_TO', 'CHANGE_TO']).optional().describe('Navigation type for NODE action (default: NAVIGATE)'),
+        transition: z.object({
+          type: z.enum(['DISSOLVE', 'SMART_ANIMATE', 'MOVE_IN', 'MOVE_OUT', 'PUSH', 'SLIDE_IN', 'SLIDE_OUT']).describe('Transition type'),
+          direction: z.enum(['LEFT', 'RIGHT', 'TOP', 'BOTTOM']).optional().describe('Direction — for MOVE_IN, MOVE_OUT, PUSH, SLIDE_IN, SLIDE_OUT'),
+          duration: z.number().optional().describe('Duration in seconds (default 0.3)'),
+          easing: z.object({
+            type: z.enum(['LINEAR', 'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'EASE_IN_BACK', 'EASE_OUT_BACK', 'EASE_IN_AND_OUT_BACK', 'CUSTOM_CUBIC_BEZIER', 'SPRING', 'CUSTOM_SPRING']).describe('Easing type'),
+            easingFunctionCubicBezier: z.object({
+              x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number()
+            }).optional().describe('Cubic bezier control points — required for CUSTOM_CUBIC_BEZIER')
+          }).optional().describe('Easing curve (default: LINEAR)')
+        }).optional().describe('Transition animation — omit for no animation'),
+        preserveScrollPosition: z.boolean().optional().describe('Preserve scroll position on navigate (default false)'),
+        overlayRelativePosition: z.object({ x: z.number(), y: z.number() }).optional().describe('Overlay position offset — for OVERLAY navigation')
+      }).describe('What happens when the trigger fires')
+    },
+    async (args) => handleAddReaction(bridge, args)
+  );
+
+  // figma_remove_reaction - Remove a reaction by index
+  server.tool(
+    'figma_remove_reaction',
+    'Prototype: remove a reaction from a node by its zero-based index in the reactions array. Use figma_get_reactions first to find the index.',
+    {
+      nodeId: z.string().describe('Node ID to remove the reaction from'),
+      index: z.number().int().min(0).describe('Zero-based index of the reaction to remove')
+    },
+    async (args) => handleRemoveReaction(bridge, args)
+  );
+
+  // figma_set_flow_starting_point - Set or clear a prototype flow starting point
+  server.tool(
+    'figma_set_flow_starting_point',
+    'Prototype: set a top-level frame as a prototype flow starting point, or clear it. Each flow has a name and an optional starting scroll offset.',
+    {
+      nodeId: z.string().describe('Frame node ID to set as flow starting point'),
+      flowName: z.string().optional().describe('Name for the flow (defaults to "Flow 1" if omitted)'),
+      startingX: z.number().optional().describe('Starting horizontal scroll offset'),
+      startingY: z.number().optional().describe('Starting vertical scroll offset'),
+      clear: z.boolean().optional().describe('If true, remove the flow starting point from this frame instead of setting it')
+    },
+    async (args) => handleSetFlowStartingPoint(bridge, args)
   );
 }

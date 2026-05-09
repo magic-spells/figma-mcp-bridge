@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 
 ## Features
 
-- **84 operations** - 63 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews)
+- **88 operations** - 63 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
 - **Works in both editors** - Auto-detects whether you're in a Figma design file or FigJam, and gates FigJam-only commands accordingly
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
@@ -998,6 +998,132 @@ figma_create_sticky({
 #### FigJam node types not creatable via this MCP
 
 `STAMP`, `HIGHLIGHT`, `WASHI_TAPE`, `WIDGET`, and `MEDIA` cannot be created from a non-widget plugin (Figma's API doesn't expose factory methods, or requires a pre-uploaded image hash). They can still be cloned, moved, deleted, and serialized through existing tools — they just can't be created from scratch.
+
+---
+
+### Prototype Commands
+
+These tools set up prototype interactions on **Figma Design** nodes. They operate on the `reactions` array (read/written via `setReactionsAsync`) and the page-level `flowStartingPoints` list. They are not applicable to FigJam files.
+
+#### `figma_get_reactions`
+Read all reactions currently set on a node.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | Node ID to read reactions from |
+
+Returns the full `reactions` array including trigger and actions details for each reaction.
+
+#### `figma_add_reaction`
+Add a prototype interaction to a node. Existing reactions are preserved — each call appends one new reaction.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | Node ID to add the reaction to |
+| `trigger` | object | Yes | What initiates the interaction (see Trigger types below) |
+| `action` | object | Yes | What happens when the trigger fires (see Action types below) |
+
+**Trigger types:**
+
+| `type` | Extra fields | Description |
+|--------|-------------|-------------|
+| `ON_CLICK` | — | Tap / click |
+| `ON_HOVER` | — | Hover |
+| `ON_PRESS` | — | Press and hold |
+| `ON_DRAG` | — | Drag |
+| `ON_MEDIA_END` | — | Media playback ends |
+| `AFTER_TIMEOUT` | `timeout` (ms) | Auto-advance after delay |
+| `MOUSE_UP` | `delay` (ms) | Mouse button released |
+| `MOUSE_DOWN` | `delay` (ms) | Mouse button pressed |
+| `MOUSE_ENTER` | `delay` (ms), `deprecatedVersion` (bool) | Cursor enters element |
+| `MOUSE_LEAVE` | `delay` (ms), `deprecatedVersion` (bool) | Cursor leaves element |
+| `ON_KEY_DOWN` | `keyCodes` (number[]), `device` | Key pressed |
+| `ON_MEDIA_HIT` | `mediaHitTime` (seconds) | Media reaches timestamp |
+
+`device` values for `ON_KEY_DOWN`: `KEYBOARD` (default), `XBOX_ONE`, `PS4`, `SWITCH_PRO`, `UNKNOWN_CONTROLLER`.
+
+**Action types:**
+
+| `type` | Key fields | Description |
+|--------|-----------|-------------|
+| `NODE` | `destinationId`, `navigation`, `transition` | Navigate to / open / scroll to a frame |
+| `BACK` | — | Go back to previous frame |
+| `CLOSE` | — | Close the current overlay |
+| `URL` | `url`, `openInNewTab` | Open a URL |
+
+For `NODE` actions, the `navigation` field controls the behaviour:
+
+| `navigation` | Description |
+|-------------|-------------|
+| `NAVIGATE` | Navigate to destination frame (default) |
+| `OVERLAY` | Open destination as an overlay |
+| `SWAP` | Swap the current frame with destination |
+| `SCROLL_TO` | Scroll to destination within the current frame |
+| `CHANGE_TO` | Change component to a different variant |
+
+**Transition object** (optional, for `NODE` actions):
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| `type` | `DISSOLVE`, `SMART_ANIMATE`, `SCROLL_ANIMATE` | Simple transitions — no `direction` |
+| `type` | `MOVE_IN`, `MOVE_OUT`, `PUSH`, `SLIDE_IN`, `SLIDE_OUT` | Directional — requires `direction` |
+| `direction` | `LEFT`, `RIGHT`, `TOP`, `BOTTOM` | Required for directional types |
+| `duration` | number (seconds) | Default `0.3` |
+| `easing.type` | `LINEAR`, `EASE_IN`, `EASE_OUT`, `EASE_IN_AND_OUT`, `EASE_IN_BACK`, `EASE_OUT_BACK`, `EASE_IN_AND_OUT_BACK`, `CUSTOM_CUBIC_BEZIER`, `SPRING`, `CUSTOM_SPRING` | |
+
+**Example — click to navigate with a slide transition:**
+```javascript
+figma_add_reaction({
+  nodeId: '10:5',
+  trigger: { type: 'ON_CLICK' },
+  action: {
+    type: 'NODE',
+    destinationId: '10:20',
+    navigation: 'NAVIGATE',
+    transition: {
+      type: 'SLIDE_IN',
+      direction: 'LEFT',
+      duration: 0.3,
+      easing: { type: 'EASE_OUT' }
+    }
+  }
+})
+```
+
+**Example — auto-advance after 3 seconds:**
+```javascript
+figma_add_reaction({
+  nodeId: '10:5',
+  trigger: { type: 'AFTER_TIMEOUT', timeout: 3000 },
+  action: {
+    type: 'NODE',
+    destinationId: '10:30',
+    navigation: 'NAVIGATE',
+    transition: { type: 'DISSOLVE', duration: 0.5, easing: { type: 'EASE_IN_AND_OUT' } }
+  }
+})
+```
+
+#### `figma_remove_reaction`
+Remove a reaction from a node by its zero-based index. Use `figma_get_reactions` first to identify the index.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeId` | string | Yes | Node ID to remove the reaction from |
+| `index` | number | Yes | Zero-based index of the reaction to remove |
+
+#### `figma_set_flow_starting_point`
+Set or clear a prototype flow starting point on a frame. Flow starting points appear in Figma's Presentation view and define where a prototype begins.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `nodeId` | string | Yes | | `FRAME`, `COMPONENT`, or `COMPONENT_SET` node ID |
+| `flowName` | string | No | `"Flow 1"` | Display name for the flow |
+| `startingX` | number | No | `0` | Starting horizontal scroll offset |
+| `startingY` | number | No | `0` | Starting vertical scroll offset |
+| `clear` | boolean | No | | If `true`, removes the flow starting point from this frame |
+
+> Only top-level frames (direct children of a page) can be flow starting points. The first entry in the page's `flowStartingPoints` list is the default when no frame is selected in Presentation view.
 
 ---
 
