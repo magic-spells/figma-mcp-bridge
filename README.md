@@ -1281,3 +1281,9 @@ Text operations require font loading. The plugin handles this automatically, but
 ## License
 
 MIT
+
+---
+
+<p align="center">
+  Made by <a href="https://github.com/coryschulz">Cory Schulz</a>
+</p>
