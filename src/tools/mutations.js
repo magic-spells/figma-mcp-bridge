@@ -4171,3 +4171,61 @@ export async function handleCombineAsVariants(bridge, args) {
     };
   }
 }
+
+// ============================================================
+// Prototype tools
+// ============================================================
+
+function _notConnected() {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ error: { code: 'NOT_CONNECTED', message: 'Figma plugin is not connected.' } }, null, 2) }],
+    isError: true
+  };
+}
+
+function _bridgeError(error) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify({ error: { code: error.code || 'UNKNOWN_ERROR', message: error.message } }, null, 2) }],
+    isError: true
+  };
+}
+
+export async function handleGetReactions(bridge, args) {
+  if (!bridge.isConnected()) return _notConnected();
+  try {
+    const result = await bridge.sendCommand('get_reactions', args);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  } catch (error) {
+    return _bridgeError(error);
+  }
+}
+
+export async function handleAddReaction(bridge, args) {
+  if (!bridge.isConnected()) return _notConnected();
+  try {
+    const result = await bridge.sendCommand('add_reaction', args);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  } catch (error) {
+    return _bridgeError(error);
+  }
+}
+
+export async function handleRemoveReaction(bridge, args) {
+  if (!bridge.isConnected()) return _notConnected();
+  try {
+    const result = await bridge.sendCommand('remove_reaction', args);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  } catch (error) {
+    return _bridgeError(error);
+  }
+}
+
+export async function handleSetFlowStartingPoint(bridge, args) {
+  if (!bridge.isConnected()) return _notConnected();
+  try {
+    const result = await bridge.sendCommand('set_flow_starting_point', args);
+    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+  } catch (error) {
+    return _bridgeError(error);
+  }
+}
