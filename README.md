@@ -1035,8 +1035,8 @@ Add a prototype interaction to a node. Existing reactions are preserved — each
 | `AFTER_TIMEOUT` | `timeout` (ms) | Auto-advance after delay |
 | `MOUSE_UP` | `delay` (ms) | Mouse button released |
 | `MOUSE_DOWN` | `delay` (ms) | Mouse button pressed |
-| `MOUSE_ENTER` | `delay` (ms), `deprecatedVersion` (bool) | Cursor enters element |
-| `MOUSE_LEAVE` | `delay` (ms), `deprecatedVersion` (bool) | Cursor leaves element |
+| `MOUSE_ENTER` | `delay` (ms) | Cursor enters element |
+| `MOUSE_LEAVE` | `delay` (ms) | Cursor leaves element |
 | `ON_KEY_DOWN` | `keyCodes` (number[]), `device` | Key pressed |
 | `ON_MEDIA_HIT` | `mediaHitTime` (seconds) | Media reaches timestamp |
 

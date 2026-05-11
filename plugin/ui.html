@@ -10,45 +10,10 @@
         background: #2c2c2c;
         color: #fff;
       }
-      .status {
-        padding: 4px 8px;
-        border-radius: 4px;
-      }
-      .connected {
-        background: #1e4620;
-      }
-      .disconnected {
-        background: #4a1e1e;
-      }
-      .connecting {
-        background: #4a3a1e;
-      }
-      .status-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      #reconnect-btn {
-        display: none;
-        padding: 4px 8px;
-        border-radius: 4px;
-        border: none;
-        background: #0d99ff;
-        color: #fff;
-        font-size: 11px;
-        cursor: pointer;
-      }
-      #reconnect-btn:hover {
-        background: #0b85e0;
-      }
-      #reconnect-btn.visible {
-        display: block;
-      }
-      .port-row {
+      .row {
         display: flex;
         align-items: center;
         gap: 6px;
-        margin-top: 8px;
       }
       .port-label {
         color: #999;
@@ -66,14 +31,24 @@
         outline: none;
         border-color: #0d99ff;
       }
+      #status-indicator {
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+        user-select: none;
+        transition: color 0.15s;
+      }
+      #status-indicator.connected {
+        color: #2ecc71;
+      }
+      #status-indicator.disconnected,
+      #status-indicator.connecting {
+        color: #c2410c;
+      }
     </style>
   </head>
   <body>
-    <div class="status-row">
-      <div id="status" class="status disconnected">Disconnected</div>
-      <button id="reconnect-btn" onclick="manualReconnect()">Reconnect</button>
-    </div>
-    <div class="port-row">
+    <div class="row">
       <span class="port-label">Port:</span>
       <input
         type="number"
@@ -83,6 +58,13 @@
         max="65535"
         onchange="changePort()"
       />
+      <span
+        id="status-indicator"
+        class="disconnected"
+        title="Disconnected — click to reconnect"
+        onclick="manualReconnect()"
+        >✓</span
+      >
     </div>
 
     <script>
@@ -96,8 +78,7 @@
       let socket = null;
       let reconnectAttempts = 0;
       let reconnectTimer = null;
-      const statusEl = document.getElementById("status");
-      const reconnectBtn = document.getElementById("reconnect-btn");
+      const indicator = document.getElementById("status-indicator");
       const portInput = document.getElementById("port-input");
 
       function getServerUrl() {
@@ -106,7 +87,6 @@
       }
 
       function changePort() {
-        // Disconnect from current server and connect to new port
         if (socket) {
           socket.close(1000, "Port changed");
           socket = null;
@@ -119,15 +99,9 @@
         connect();
       }
 
-      function setStatus(state, text) {
-        statusEl.textContent = text;
-        statusEl.className = "status " + state;
-        // Show reconnect button only when disconnected or failed
-        if (state === "disconnected") {
-          reconnectBtn.classList.add("visible");
-        } else {
-          reconnectBtn.classList.remove("visible");
-        }
+      function setStatus(state, tooltip) {
+        indicator.className = state;
+        indicator.title = tooltip;
       }
 
       function manualReconnect() {
@@ -142,16 +116,15 @@
       function connect() {
         if (socket && socket.readyState === WebSocket.OPEN) return;
 
-        setStatus("connecting", "Connecting...");
+        setStatus("connecting", "Connecting to port " + portInput.value + "…");
 
         try {
           socket = new WebSocket(getServerUrl());
 
           socket.onopen = () => {
             console.log("[UI] Connected to port " + portInput.value);
-            setStatus("connected", "Connected: " + portInput.value);
+            setStatus("connected", "Connected on port " + portInput.value);
             reconnectAttempts = 0;
-            // Ask main thread for handshake info
             parent.postMessage(
               { pluginMessage: { type: "get_handshake_info" } },
               "*",
@@ -179,7 +152,6 @@
               return;
             }
 
-            // Forward commands to main thread
             if (message.requestId && message.command) {
               parent.postMessage(
                 {
@@ -197,7 +169,7 @@
 
           socket.onclose = (event) => {
             console.log("[UI] Closed:", event.code);
-            setStatus("disconnected", "Disconnected");
+            setStatus("disconnected", "Disconnected — click to reconnect");
             socket = null;
             if (event.code !== 1000) scheduleReconnect();
           };
@@ -211,7 +183,7 @@
 
       function scheduleReconnect() {
         if (reconnectAttempts >= CONFIG.reconnectMaxAttempts) {
-          setStatus("disconnected", "Failed");
+          setStatus("disconnected", "Failed — click to reconnect");
           return;
         }
         const delay = Math.min(
@@ -219,7 +191,7 @@
           CONFIG.reconnectMaxDelay,
         );
         reconnectAttempts++;
-        setStatus("connecting", "Retry in " + delay / 1000 + "s");
+        setStatus("connecting", "Retry in " + delay / 1000 + "s — click to retry now");
         reconnectTimer = setTimeout(connect, delay);
       }
 
@@ -229,7 +201,6 @@
         }
       }
 
-      // Messages from main thread
       window.onmessage = (event) => {
         const msg = event.data.pluginMessage;
         if (!msg) return;

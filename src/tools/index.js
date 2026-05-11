@@ -1551,7 +1551,6 @@ export function registerTools(server, bridge) {
         ]).describe('Trigger type'),
         timeout: z.number().optional().describe('Delay in ms — required for AFTER_TIMEOUT'),
         delay: z.number().optional().describe('Delay in ms — for MOUSE_UP, MOUSE_DOWN, MOUSE_ENTER, MOUSE_LEAVE'),
-        deprecatedVersion: z.boolean().optional().describe('For MOUSE_ENTER/MOUSE_LEAVE only'),
         device: z.enum(['KEYBOARD', 'XBOX_ONE', 'PS4', 'SWITCH_PRO', 'UNKNOWN_CONTROLLER']).optional().describe('Input device — for ON_KEY_DOWN (default: KEYBOARD)'),
         keyCodes: z.array(z.number()).optional().describe('Key codes — for ON_KEY_DOWN'),
         mediaHitTime: z.number().optional().describe('Time in seconds — for ON_MEDIA_HIT')

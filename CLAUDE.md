@@ -338,6 +338,11 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 34. **Directional transitions require `matchLayers`** — `MOVE_IN`, `MOVE_OUT`, `PUSH`, `SLIDE_IN`, `SLIDE_OUT` are `DirectionalTransition` in the typings, which requires both `direction` AND `matchLayers: boolean`. `setReactionsAsync` rejects the reaction at validation time without `matchLayers`, with a misleading error that mentions every union variant. The `buildTransition` helper in `plugin/code.js` sets `matchLayers: false` by default for directional types — exposed as an optional schema param.
 
+35. **Live-tested Figma-runtime constraints surfaced during prototype tool testing:**
+- **URL action requires a click-like trigger** — `ON_HOVER` + `URL` is rejected. Use `ON_CLICK` or one of the mouse triggers.
+- **`overlayRelativePosition` requires `overlayPosition: MANUAL` on the destination frame** — without that, `setReactionsAsync` rejects the OVERLAY action. Plain OVERLAY navigation (no relative position) works fine.
+- **`SCROLL_TO` navigation requires the destination be a scrollable child of the source's container** — pointing it at a separate top-level frame is rejected. Same for `SCROLL_ANIMATE` transitions in unrelated contexts.
+
 ## Running the Server
 
 ```bash

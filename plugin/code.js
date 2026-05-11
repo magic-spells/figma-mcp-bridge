@@ -6,7 +6,7 @@
  */
 
 // Show UI (handles WebSocket connection)
-figma.showUI(__html__, { visible: true, width: 200, height: 80 });
+figma.showUI(__html__, { visible: true, width: 200, height: 40 });
 
 // Handle messages from UI
 figma.ui.onmessage = async (msg) => {
@@ -15,7 +15,7 @@ figma.ui.onmessage = async (msg) => {
     figma.ui.postMessage({
       type: 'handshake_info',
       payload: {
-        pluginVersion: '0.1.0',
+        pluginVersion: '0.3.0',
         protocolVersion: '1',
         fileId: figma.fileKey || 'unknown',
         fileName: figma.root.name,
@@ -4949,7 +4949,8 @@ function buildTrigger(t) {
   }
   if (t.type === 'MOUSE_ENTER' || t.type === 'MOUSE_LEAVE') {
     trigger.delay = t.delay !== undefined ? t.delay : 0;
-    trigger.deprecatedVersion = t.deprecatedVersion !== undefined ? t.deprecatedVersion : false;
+    // NOTE: `deprecatedVersion` is in @figma/plugin-typings but the current runtime
+    // rejects it with "Unrecognized key(s) in object: 'deprecatedVersion'". Do not send.
   }
   return trigger;
 }
