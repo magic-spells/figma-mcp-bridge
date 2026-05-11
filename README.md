@@ -5,7 +5,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 ## Features
 
 - **88 operations** - 63 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
-- **Works in both editors** - Auto-detects whether you're in a Figma design file or FigJam, and gates FigJam-only commands accordingly
+- **Works in both editors** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools)
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
 - **Full Figma API access** - Styles, variables, auto-layout, boolean operations, plus FigJam diagrams and documentation
@@ -1049,7 +1049,7 @@ Add a prototype interaction to a node. Existing reactions are preserved — each
 | `NODE` | `destinationId`, `navigation`, `transition` | Navigate to / open / scroll to a frame |
 | `BACK` | — | Go back to previous frame |
 | `CLOSE` | — | Close the current overlay |
-| `URL` | `url`, `openInNewTab` | Open a URL |
+| `URL` | `url`, `openInNewTab` (bool) | Open a URL — set `openInNewTab: true` to open in a new tab |
 
 For `NODE` actions, the `navigation` field controls the behaviour:
 
@@ -1068,8 +1068,9 @@ For `NODE` actions, the `navigation` field controls the behaviour:
 | `type` | `DISSOLVE`, `SMART_ANIMATE`, `SCROLL_ANIMATE` | Simple transitions — no `direction` |
 | `type` | `MOVE_IN`, `MOVE_OUT`, `PUSH`, `SLIDE_IN`, `SLIDE_OUT` | Directional — requires `direction` |
 | `direction` | `LEFT`, `RIGHT`, `TOP`, `BOTTOM` | Required for directional types |
+| `matchLayers` | boolean (default `false`) | Smart-match shared layers — directional types only |
 | `duration` | number (seconds) | Default `0.3` |
-| `easing.type` | `LINEAR`, `EASE_IN`, `EASE_OUT`, `EASE_IN_AND_OUT`, `EASE_IN_BACK`, `EASE_OUT_BACK`, `EASE_IN_AND_OUT_BACK`, `CUSTOM_CUBIC_BEZIER`, `SPRING`, `CUSTOM_SPRING` | |
+| `easing.type` | `LINEAR`, `EASE_IN`, `EASE_OUT`, `EASE_IN_AND_OUT`, `EASE_IN_BACK`, `EASE_OUT_BACK`, `EASE_IN_AND_OUT_BACK`, `CUSTOM_CUBIC_BEZIER`, `GENTLE`, `QUICK`, `BOUNCY`, `SLOW`, `CUSTOM_SPRING` | `GENTLE`/`QUICK`/`BOUNCY`/`SLOW` are spring presets |
 
 **Example — click to navigate with a slide transition:**
 ```javascript
@@ -1113,17 +1114,15 @@ Remove a reaction from a node by its zero-based index. Use `figma_get_reactions`
 | `index` | number | Yes | Zero-based index of the reaction to remove |
 
 #### `figma_set_flow_starting_point`
-Set or clear a prototype flow starting point on a frame. Flow starting points appear in Figma's Presentation view and define where a prototype begins.
+Set or clear a prototype flow starting point. Flow starting points are page-level — Figma stores them on the parent `PageNode` as a list of `{ nodeId, name }` entries. The first entry is the default when entering Presentation view with nothing selected.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `nodeId` | string | Yes | | `FRAME`, `COMPONENT`, or `COMPONENT_SET` node ID |
-| `flowName` | string | No | `"Flow 1"` | Display name for the flow |
-| `startingX` | number | No | `0` | Starting horizontal scroll offset |
-| `startingY` | number | No | `0` | Starting vertical scroll offset |
-| `clear` | boolean | No | | If `true`, removes the flow starting point from this frame |
+| `flowName` | string | No | `"Flow 1"` | Display name for the flow. If the frame is already a starting point, its name is updated. |
+| `clear` | boolean | No | | If `true`, removes the flow starting point for this frame from the page |
 
-> Only top-level frames (direct children of a page) can be flow starting points. The first entry in the page's `flowStartingPoints` list is the default when no frame is selected in Presentation view.
+> Top-level frames (direct children of a page) are the typical starting points. The Figma typings mark `PageNode.flowStartingPoints` as `ReadonlyArray`, but the runtime accepts direct assignment — that's the documented (if quirky) pattern this tool uses internally.
 
 ---
 

@@ -1562,13 +1562,15 @@ export function registerTools(server, bridge) {
         ),
         destinationId: z.string().optional().describe('Target frame/node ID — for NODE action'),
         url: z.string().optional().describe('URL string — required for URL action'),
+        openInNewTab: z.boolean().optional().describe('Open URL in a new tab (default false) — for URL action'),
         navigation: z.enum(['NAVIGATE', 'SWAP', 'OVERLAY', 'SCROLL_TO', 'CHANGE_TO']).optional().describe('Navigation type for NODE action (default: NAVIGATE)'),
         transition: z.object({
-          type: z.enum(['DISSOLVE', 'SMART_ANIMATE', 'MOVE_IN', 'MOVE_OUT', 'PUSH', 'SLIDE_IN', 'SLIDE_OUT']).describe('Transition type'),
-          direction: z.enum(['LEFT', 'RIGHT', 'TOP', 'BOTTOM']).optional().describe('Direction — for MOVE_IN, MOVE_OUT, PUSH, SLIDE_IN, SLIDE_OUT'),
+          type: z.enum(['DISSOLVE', 'SMART_ANIMATE', 'SCROLL_ANIMATE', 'MOVE_IN', 'MOVE_OUT', 'PUSH', 'SLIDE_IN', 'SLIDE_OUT']).describe('Transition type. DISSOLVE/SMART_ANIMATE/SCROLL_ANIMATE take no direction; MOVE_IN/MOVE_OUT/PUSH/SLIDE_IN/SLIDE_OUT require direction.'),
+          direction: z.enum(['LEFT', 'RIGHT', 'TOP', 'BOTTOM']).optional().describe('Direction — required for MOVE_IN, MOVE_OUT, PUSH, SLIDE_IN, SLIDE_OUT'),
+          matchLayers: z.boolean().optional().describe('Smart-match shared layers across frames during a directional transition (default false). Only used by directional types.'),
           duration: z.number().optional().describe('Duration in seconds (default 0.3)'),
           easing: z.object({
-            type: z.enum(['LINEAR', 'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'EASE_IN_BACK', 'EASE_OUT_BACK', 'EASE_IN_AND_OUT_BACK', 'CUSTOM_CUBIC_BEZIER', 'SPRING', 'CUSTOM_SPRING']).describe('Easing type'),
+            type: z.enum(['LINEAR', 'EASE_IN', 'EASE_OUT', 'EASE_IN_AND_OUT', 'EASE_IN_BACK', 'EASE_OUT_BACK', 'EASE_IN_AND_OUT_BACK', 'CUSTOM_CUBIC_BEZIER', 'GENTLE', 'QUICK', 'BOUNCY', 'SLOW', 'CUSTOM_SPRING']).describe('Easing type. GENTLE/QUICK/BOUNCY/SLOW are spring presets.'),
             easingFunctionCubicBezier: z.object({
               x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number()
             }).optional().describe('Cubic bezier control points — required for CUSTOM_CUBIC_BEZIER')
@@ -1595,13 +1597,11 @@ export function registerTools(server, bridge) {
   // figma_set_flow_starting_point - Set or clear a prototype flow starting point
   server.tool(
     'figma_set_flow_starting_point',
-    'Prototype: set a top-level frame as a prototype flow starting point, or clear it. Each flow has a name and an optional starting scroll offset.',
+    'Prototype: set a top-level frame as a prototype flow starting point on the current page, or clear it. Flow starting points are page-level — Figma stores them as { nodeId, name } entries on the page.',
     {
-      nodeId: z.string().describe('Frame node ID to set as flow starting point'),
-      flowName: z.string().optional().describe('Name for the flow (defaults to "Flow 1" if omitted)'),
-      startingX: z.number().optional().describe('Starting horizontal scroll offset'),
-      startingY: z.number().optional().describe('Starting vertical scroll offset'),
-      clear: z.boolean().optional().describe('If true, remove the flow starting point from this frame instead of setting it')
+      nodeId: z.string().describe('Frame node ID to set as flow starting point. Must be FRAME, COMPONENT, or COMPONENT_SET.'),
+      flowName: z.string().optional().describe('Name for the flow (defaults to "Flow 1" if omitted). If the frame is already a flow starting point, its name is updated.'),
+      clear: z.boolean().optional().describe('If true, remove the flow starting point for this frame from the page')
     },
     async (args) => handleSetFlowStartingPoint(bridge, args)
   );

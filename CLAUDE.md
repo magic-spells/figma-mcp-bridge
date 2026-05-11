@@ -1,6 +1,6 @@
 # Figma MCP Bridge - Developer Guide
 
-MCP server enabling Claude to read and manipulate **Figma design files AND FigJam files** via WebSocket bridge to a Figma plugin. Supports flowcharts, diagrams, sticky notes, tables, code blocks, and link previews in FigJam alongside the full Figma design toolset.
+MCP server enabling Claude to read and manipulate **Figma design files AND FigJam files** via WebSocket bridge to a Figma plugin. Supports flowcharts, diagrams, sticky notes, tables, code blocks, and link previews in FigJam alongside the full Figma design toolset — plus prototype interactions (reactions, flow starting points) in Figma Design files.
 
 ## Tech Stack
 - Node.js (ES modules)
@@ -23,11 +23,11 @@ src/
 ├── server.js          # MCP server setup (McpServer configuration)
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (84 tools — 63 Figma + 21 FigJam)
+    ├── index.js       # Tool registration with Zod schemas (88 tools — 63 Figma + 21 FigJam + 4 Prototype)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
-    └── mutations.js   # All mutation handlers (Figma + FigJam)
+    └── mutations.js   # All mutation handlers (Figma + FigJam + Prototype)
 
 plugin/
 ├── manifest.json      # Figma plugin configuration
@@ -114,6 +114,20 @@ validateConnectorMagnet(lineType, startEndpoint);          // STRAIGHT lines onl
 
 `createSection` is the one exception — sections work in both editors, so it does NOT call `requireFigJam()`.
 
+### Adding a Figma-Design-only command
+
+Mirror of the FigJam pattern, for commands that only make sense in Figma Design files (prototype reactions, flow starting points). Use the `requireFigmaDesign()` guard at the top of the plugin handler:
+
+```javascript
+async function getReactions(params) {
+  requireFigmaDesign();  // throws FIGMA_DESIGN_ONLY if running in FigJam
+  var node = await figma.getNodeByIdAsync(params.nodeId);
+  // ...
+}
+```
+
+The helper is at `plugin/code.js` next to `requireFigJam()`.
+
 ## FigJam Tools Overview
 
 | Tool | Creates / modifies | Notes |
@@ -139,6 +153,19 @@ validateConnectorMagnet(lineType, startEndpoint);          // STRAIGHT lines onl
 `figma_set_text` and `figma_set_text_style` were extended to handle the four sublayer-bearing FigJam node types (sticky, shape-with-text, connector, table cell) — call them with the parent node's id.
 
 **FigJam-only node types we deliberately do NOT wrap creation for:** `STAMP`, `HIGHLIGHT`, `WASHI_TAPE`, `WIDGET`, `MEDIA`. Figma's API gives no factory method for these from a non-widget plugin (or requires a pre-uploaded image hash). They can still be cloned, moved, deleted, and serialized (they get `stuckTo` exposed) — just not created from scratch.
+
+## Prototype Tools Overview
+
+These tools are **Figma-Design-only** (gated by `requireFigmaDesign()` in the plugin). They operate on the `reactions` array of any reaction-bearing node and the page-level `flowStartingPoints` list.
+
+| Tool | Reads / writes | Notes |
+|------|----------------|-------|
+| `figma_get_reactions` | `node.reactions` | Works on any node where `'reactions' in node` is true (FRAME, INSTANCE, COMPONENT, etc.) |
+| `figma_add_reaction` | `node.setReactionsAsync()` | Appends one reaction `{ trigger, actions: [action] }`; preserves existing reactions; deep-clones via `safeClone` before mutating |
+| `figma_remove_reaction` | `node.setReactionsAsync()` | Removes by zero-based index — use `figma_get_reactions` to find it |
+| `figma_set_flow_starting_point` | `page.flowStartingPoints` | Page-level, not frame-level (despite the singular tool name). Uses `getPageForNode()` to locate the parent page. |
+
+Trigger and Action schemas mirror Figma's plugin typings — the full enums (12 triggers, 4 action types, navigation/transition/easing) are documented in the README.
 
 ## Token Optimization
 
@@ -300,6 +327,16 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 29. **The plugin's main catch normalizes non-Error throws** - `figma.ui.onmessage` handler in `plugin/code.js:38` converts string/plain-object/null throws into a usable `{ code, message }` shape. Without this, `error.message` would be `undefined` and surface as "Unknown error" on the MCP side. When throwing soft errors from a command handler, attach `.code` to the Error object and a meaningful `.message`.
 
 30. **`figma.createPage()` is Figma Design only** - The FigJam plugin runtime does NOT expose `figma.createPage()` — calling it returns `figma.createPage is not a function`. `PageNode.clone()` is similarly unavailable. Use the `requireFigmaDesign()` helper to gate these. FigJam files DO support multiple pages, but pages must be created from the FigJam UI; plugins cannot create them programmatically. Other page operations (`renamePage`, `deletePage`, `setCurrentPage`, `listPages`) work in both editors.
+
+## Prototype Constraints
+
+31. **Reactions are written via `setReactionsAsync(newArray)`, not via `node.reactions = ...`** - The `reactions` property is readable but writes go through the async setter. Clone existing entries with `safeClone(r)` before pushing/splicing — `node.reactions` returns frozen objects you can't mutate in place. The reaction shape is `{ trigger, actions: [action] }` (the `action` singular field is deprecated; always use the `actions` array).
+
+32. **`PageNode.flowStartingPoints` is typed as `ReadonlyArray` but the runtime accepts assignment** - This is the only documented way to add/remove flow starting points. There is NO `FrameNode.flowStartingPoint` property — flow starting points are page-level. Pattern: read `page.flowStartingPoints`, map to plain `{ nodeId, name }` entries, mutate the array, then assign back to `page.flowStartingPoints`. Each entry is `{ nodeId: string, name: string }` — no scroll offset or other fields are part of the documented shape.
+
+33. **Prototype tools require Figma Design** - All four prototype tools (`get_reactions`, `add_reaction`, `remove_reaction`, `set_flow_starting_point`) call `requireFigmaDesign()` at the top of the plugin handler. `FIGMA_DESIGN_ONLY` is the error code surfaced to the MCP client when called from FigJam.
+
+34. **Directional transitions require `matchLayers`** — `MOVE_IN`, `MOVE_OUT`, `PUSH`, `SLIDE_IN`, `SLIDE_OUT` are `DirectionalTransition` in the typings, which requires both `direction` AND `matchLayers: boolean`. `setReactionsAsync` rejects the reaction at validation time without `matchLayers`, with a misleading error that mentions every union variant. The `buildTransition` helper in `plugin/code.js` sets `matchLayers: false` by default for directional types — exposed as an optional schema param.
 
 ## Running the Server
 

@@ -4812,6 +4812,7 @@ async function createLinkPreview(params) {
 // ============================================================
 
 async function getReactions(params) {
+  requireFigmaDesign();
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -4827,6 +4828,7 @@ async function getReactions(params) {
 }
 
 async function addReaction(params) {
+  requireFigmaDesign();
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -4852,6 +4854,7 @@ async function addReaction(params) {
 }
 
 async function removeReaction(params) {
+  requireFigmaDesign();
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -4878,6 +4881,7 @@ async function removeReaction(params) {
 }
 
 async function setFlowStartingPoint(params) {
+  requireFigmaDesign();
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -4890,24 +4894,40 @@ async function setFlowStartingPoint(params) {
     throw err2;
   }
 
-  // flowStartingPoints is ReadonlyArray — no setter; must use node-level startingPoint property
-  // The correct API: FrameNode.flowStartingPoint (get/set) for the node itself
+  // Flow starting points live on the PAGE, not the frame. The Figma typings mark
+  // PageNode.flowStartingPoints as ReadonlyArray, but the runtime accepts direct
+  // assignment of a new array — that's the documented (if quirky) pattern.
+  var page = getPageForNode(node);
+  if (!page) {
+    var err3 = new Error('Could not find parent page for node ' + params.nodeId);
+    err3.code = 'OPERATION_FAILED';
+    throw err3;
+  }
+
+  var current = page.flowStartingPoints.map(function(fp) {
+    return { nodeId: fp.nodeId, name: fp.name };
+  });
+
   if (params.clear) {
-    node.flowStartingPoint = null;
-    return { success: true, nodeId: node.id, cleared: true };
+    var filtered = current.filter(function(fp) { return fp.nodeId !== node.id; });
+    page.flowStartingPoints = filtered;
+    return { success: true, nodeId: node.id, cleared: true, flowStartingPoints: page.flowStartingPoints };
   }
 
   var flowName = params.flowName || 'Flow 1';
-  var fp = { name: flowName };
-  if (params.startingX !== undefined || params.startingY !== undefined) {
-    fp.startingScrollOffset = {
-      x: params.startingX !== undefined ? params.startingX : 0,
-      y: params.startingY !== undefined ? params.startingY : 0
-    };
+  var entry = { nodeId: node.id, name: flowName };
+  var existingIdx = -1;
+  for (var i = 0; i < current.length; i++) {
+    if (current[i].nodeId === node.id) { existingIdx = i; break; }
   }
-  node.flowStartingPoint = fp;
+  if (existingIdx >= 0) {
+    current[existingIdx] = entry;
+  } else {
+    current.push(entry);
+  }
+  page.flowStartingPoints = current;
 
-  return { success: true, nodeId: node.id, flowStartingPoint: node.flowStartingPoint };
+  return { success: true, nodeId: node.id, flowStartingPoints: page.flowStartingPoints };
 }
 
 // ---- Prototype helpers ----
@@ -4942,7 +4962,11 @@ function buildAction(a) {
 
   // URL action
   if (a.type === 'URL') {
-    return { type: 'URL', url: a.url || '' };
+    var urlAction = { type: 'URL', url: a.url || '' };
+    if (a.openInNewTab !== undefined) {
+      urlAction.openInNewTab = a.openInNewTab;
+    }
+    return urlAction;
   }
 
   // NODE action — covers NAVIGATE, OVERLAY, SCROLL_TO, SWAP, CHANGE_TO via navigation field
@@ -4965,8 +4989,13 @@ function buildTransition(t) {
     duration: t.duration !== undefined ? t.duration : 0.3,
     easing: t.easing ? Object.assign({}, t.easing) : { type: 'LINEAR' }
   };
-  if (t.direction !== undefined) {
+  // Directional transitions (MOVE_IN/MOVE_OUT/PUSH/SLIDE_IN/SLIDE_OUT) require
+  // matchLayers — Figma's setReactionsAsync validator rejects them without it.
+  var isDirectional = t.type === 'MOVE_IN' || t.type === 'MOVE_OUT' ||
+                      t.type === 'PUSH' || t.type === 'SLIDE_IN' || t.type === 'SLIDE_OUT';
+  if (isDirectional) {
     transition.direction = t.direction;
+    transition.matchLayers = t.matchLayers !== undefined ? t.matchLayers : false;
   }
   return transition;
 }
