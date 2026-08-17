@@ -478,7 +478,11 @@ export async function handleResizeNodes(bridge, args) {
       content: [{
         type: 'text',
         text: JSON.stringify(result, null, 2)
-      }]
+      }],
+      // The plugin verifies width/height by readback. A resize that silently did
+      // nothing comes back as success: false with an errors array — surface that
+      // as an error instead of letting the caller record work that never happened.
+      isError: !!(result && result.success === false)
     };
   } catch (error) {
     return {
@@ -3860,7 +3864,7 @@ export async function handleSetRotation(bridge, args) {
     };
   }
 
-  const { nodeIds, rotation } = args;
+  const { nodeIds, rotation, pivot } = args;
 
   if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
     return {
@@ -3875,6 +3879,10 @@ export async function handleSetRotation(bridge, args) {
       }],
       isError: true
     };
+  }
+
+  if (pivot !== undefined && pivot !== 'center' && pivot !== 'top-left') {
+    return invalidParams(`pivot must be "center" or "top-left", got "${pivot}"`);
   }
 
   if (rotation === undefined) {
@@ -4236,6 +4244,54 @@ export async function handleSetClipsContent(bridge, args) {
   }
 
   return runCommand(bridge, 'set_clips_content', args);
+}
+
+/**
+ * Set or clear min/max size limits on nodes.
+ *
+ * `null` is a meaningful value here (it clears the limit), so the presence check
+ * uses hasOwnProperty rather than a truthiness test.
+ */
+export async function handleSetSizeLimits(bridge, args) {
+  const { nodeIds } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node IDs');
+  }
+
+  const limitFields = ['minWidth', 'maxWidth', 'minHeight', 'maxHeight'];
+  const provided = limitFields.filter(
+    (field) => Object.prototype.hasOwnProperty.call(args, field) && args[field] !== undefined
+  );
+
+  if (provided.length === 0) {
+    return invalidParams(
+      'At least one of minWidth, maxWidth, minHeight, maxHeight must be provided. ' +
+      'Pass a number to set a limit, or null to clear it.'
+    );
+  }
+
+  for (const field of provided) {
+    const value = args[field];
+    if (value !== null && (typeof value !== 'number' || !(value > 0))) {
+      return invalidParams(`${field} must be a positive number, or null to clear it (got ${JSON.stringify(value)})`);
+    }
+  }
+
+  const result = await runCommand(bridge, 'set_size_limits', args);
+  if (result.isError) return result;
+
+  // The plugin verifies every write by readback; a limit that did not land comes
+  // back as success: false with an errors array.
+  try {
+    const parsed = JSON.parse(result.content[0].text);
+    if (parsed && parsed.success === false) {
+      return Object.assign({}, result, { isError: true });
+    }
+  } catch (_) {
+    // Non-JSON payload — leave the response as-is.
+  }
+  return result;
 }
 
 /**

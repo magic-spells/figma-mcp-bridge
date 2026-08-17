@@ -23,7 +23,7 @@ src/
 ├── server.js          # MCP server setup (McpServer configuration)
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (92 tools — 67 Figma + 21 FigJam + 4 Prototype)
+    ├── index.js       # Tool registration with Zod schemas (93 tools — 68 Figma + 21 FigJam + 4 Prototype)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
@@ -86,11 +86,11 @@ case 'new_command':
 
 ### Adding a FigJam-only command
 
-For commands that only make sense in FigJam (sticky notes, shapes-with-text, connectors, tables, code blocks, link previews), use the `requireFigJam()` guard at the top of the plugin handler:
+For commands that only make sense in FigJam (sticky notes, shapes-with-text, connectors, tables, code blocks, link previews), use the `requireFigJam()` guard at the top of the plugin handler. **Always pass the MCP tool name** — the error message names the tool, states it is FigJam only, and reports the current editor:
 
 ```javascript
 async function createSticky(params) {
-  requireFigJam();  // throws WRONG_EDITOR if running in a Figma design file
+  requireFigJam('figma_create_sticky');  // throws WRONG_EDITOR outside FigJam
   var sticky = figma.createSticky();
   // ...
   await attachToParent(sticky, params.parentId);  // shared helper for parent attachment
@@ -120,13 +120,15 @@ Mirror of the FigJam pattern, for commands that only make sense in Figma Design 
 
 ```javascript
 async function getReactions(params) {
-  requireFigmaDesign();  // throws FIGMA_DESIGN_ONLY if running in FigJam
+  requireFigmaDesign('figma_get_reactions');  // throws FIGMA_DESIGN_ONLY outside Figma Design
   var node = await figma.getNodeByIdAsync(params.nodeId);
   // ...
 }
 ```
 
 The helper is at `plugin/code.js` next to `requireFigJam()`.
+
+Both guards use an **explicit equality check**, never `!== 'figjam'`. `figma.editorType` has **five** values — `'figma' | 'figjam' | 'dev' | 'slides' | 'buzz'` — so a negated check would wrongly admit Dev Mode, Slides and Buzz. `describeCurrentEditor()` maps all five to a readable label for the error message.
 
 ## FigJam Tools Overview
 
@@ -239,6 +241,16 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - `NODE_NOT_FOUND` - Invalid node ID
 - `INVALID_PARAMS` - Missing/invalid parameters
 - `OPERATION_FAILED` - Figma API error
+- `WRONG_EDITOR` - FigJam-only tool called outside FigJam (message names the tool + current editorType)
+- `FIGMA_DESIGN_ONLY` - Figma-Design-only tool called outside a design file
+- `INSTANCE_SUBLAYER_RESTRICTED` - Resize / size-bind attempted on a node inside an INSTANCE
+- `BIND_NOT_APPLIED` - `setBoundVariable` reported no error but the bind does not read back
+- `UNBIND_FAILED` - Unbind threw, or the field still reads back bound
+- `STYLE_NOT_APPLIED` - Async style setter reported no error but the style id does not read back
+- `STYLE_SETTER_UNAVAILABLE` - Node exposes the `*StyleId` property but not its required async setter
+- `RESIZE_NO_OP` - `resize()` changed nothing and the size still differs from the request
+- `LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED` - A min/max size limit did not stick / did not clear
+- `FIELD_NOT_SUPPORTED` - Node type does not have the requested field
 
 ### Standard Response Format
 
@@ -316,7 +328,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 24. **Stamps/Highlights/WashiTape/Widgets cannot be created from plugins** - Only cloned from existing user-placed instances. They serialize their `stuckTo` node ID for inspection.
 
-25. **`editorType` is exposed in `figma_get_context`** - Returns `"figma"` or `"figjam"`. The `requireFigJam()` plugin helper guards FigJam-only commands; `WRONG_EDITOR` is the standard error code.
+25. **`editorType` is exposed in `figma_get_context`** - The union has **five** members: `"figma" | "figjam" | "dev" | "slides" | "buzz"`. The `requireFigJam(toolName)` plugin helper guards FigJam-only commands (`WRONG_EDITOR`); `requireFigmaDesign(toolName)` guards the reverse (`FIGMA_DESIGN_ONLY`). Both take an explicit tool name so the error identifies the tool, says it is FigJam-only / Design-only, and reports the current editor via `describeCurrentEditor()`. Never gate on `!== 'figjam'`.
 
 26. **`StickyNode.authorName` / `authorVisible` are read-only at runtime** - Figma's docs list them as R/W, but the FigJam plugin runtime throws "no setter for property" on assignment. Figma auto-populates both from the active user's identity. The schemas for `figma_create_sticky` / `figma_set_sticky` deliberately do NOT expose these. Don't add them back unless you've verified the runtime accepts writes.
 
@@ -354,6 +366,24 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 39. **`strokeWeight` reads as `figma.mixed` when per-side weights differ** - `figma.mixed` is a Symbol, and `safeClone` turns Symbols into `null` — which would read as "no stroke weight". `readStrokeWeight(node)` returns the string `'MIXED'` instead, and the serializer then emits the four per-side weights alongside it. Per-side weights (`IndividualStrokesMixin`) exist on `RECTANGLE` plus the frame-likes (`FRAME`, `COMPONENT`, `COMPONENT_SET`, `INSTANCE`, `SLOT`, `SLIDE`) only.
 
 40. **`style.remove()` only deletes local styles** - It is sync and unrestricted, but the *fetch* must be `figma.getStyleByIdAsync`. `figma_delete_style` returns a `REMOTE_STYLE` error for library styles. Note `style.consumers` throws under dynamic-page — use `getStyleConsumersAsync()` if a consumer check is ever added.
+
+41. **All five `*StyleId` properties are READ-ONLY under dynamic-page** - `node.textStyleId = id` throws `Cannot call with documentAccess: dynamic-page. Use node.setTextStyleIdAsync instead.` `applyStyle` in `plugin/code.js` dispatches through `setFillStyleIdAsync` / `setStrokeStyleIdAsync` / `setTextStyleIdAsync` / `setEffectStyleIdAsync` / `setGridStyleIdAsync` and passes `style.id` (the canonical form — user-supplied ids drop the trailing comma, hence `normalizeStyleId()` for the comparison). Never add a plain `node.someStyleId = ...` assignment. The result is verified by readback and fails with `STYLE_NOT_APPLIED` rather than reporting success. `textStyleId` / `fillStyleId` can read back as `figma.mixed`, so any non-string readback counts as "not applied".
+
+## Anti-silent-failure Constraints
+
+Figma has several writes that report success and change nothing. The rule for this bridge: **no handler returns `success: true` without reading the value back.** Codes below are stable and referenced in tool descriptions.
+
+42. **Instance sublayers reject size overrides silently** - `resize()` and `setBoundVariable('width'|'height', v)` on a node inside an INSTANCE do nothing and report success. `assertNotInstanceSublayer(node, operation, remedy)` throws `INSTANCE_SUBLAYER_RESTRICTED` up front in `resizeNodes` and in the `setVariable` node-bind path. Detection is `findInstanceAncestor(node)` — a `node.parent` walk for `type === 'INSTANCE'`, stopping at PAGE/DOCUMENT. **The `I<instanceId>;<childId>` node-id convention is community lore, documented nowhere in Figma's typings, and is deliberately NOT used.** The suggested remedy in every message is: bind/resize on the component master, or use `figma_set_layout_align: STRETCH` (which works inside instances *and* preserves binds).
+
+43. **Every node variable bind is verified** - After `node.setBoundVariable(field, variable)` the plugin re-reads `node.boundVariables[field]` via `readBoundAlias()` and throws `BIND_NOT_APPLIED` if it is absent or points at a different variable. `readBoundAlias` handles the two readback quirks: node-level text fields come back as `VariableAlias[]`, and a `cornerRadius` bind surfaces on rects/frames as the four per-corner keys. The paint path (`fills`/`strokes`) is verified too, since `setBoundVariableForPaint` returns a copy. Successful binds echo `boundVariables` and `verified: true`.
+
+44. **Resize and layout changes can destroy width/height binds** - Undocumented in *both* directions, so the contract is empirical: capture → write → re-read → re-apply → verify. `captureSizeBinds(node)` snapshots the six size fields (`width`, `height`, `minWidth`, `maxWidth`, `minHeight`, `maxHeight`); `restoreSizeBinds(node, captured)` re-applies anything that went missing and verifies. Recovered binds land in `rebound`; unrecoverable ones become `warnings` via `describeLostBinds()`. Wired into both `resizeNodes` and `setAutoLayout` (where `layoutMode` / `primaryAxisSizingMode` are the risky writes).
+
+45. **`figma_resize_nodes` verifies the resulting size** - `SIZE_EPSILON = 0.01`. Unchanged size + differs from request → `RESIZE_NO_OP` in `errors` and `success: false` (the MCP handler flips that to `isError`). Changed but not to the requested value → a clamp `warning`. Each node echoes `requested` and `actual`.
+
+46. **min/max size limits: `null` clears, and unbinding leaves a literal behind** - `figma_set_size_limits` sets or clears all four, verifying each readback (`LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED`). It warns when the node is neither an auto-layout frame nor a direct child of one, and when the field is variable-bound (the bind beats the literal). `figma_unbind_variable` on a min/max field additionally sets the residual literal to `null` — without that, unbinding `maxWidth` freezes the last resolved number as a permanent clamp — and reports `previousLiteral` / `clearedLiteral`.
+
+47. **`node.rotation` pivots on the TOP-LEFT, not the center** - Documented Figma behavior. `figma_set_rotation` defaults to `pivot: 'center'` and writes `relativeTransform` instead: read the current transform, compute the visual center in parent space, then solve for the translation that keeps it. Matrix is row-major `[[m00,m01,m02],[m10,m11,m12]]` with `rotation === atan2(-m10, m00)`, so a rotation of θ is `[[cos, sin, tx], [-sin, cos, ty]]`. **Auto-layout children are excluded** — the parent computes their translation and discards the compensating one — so those get a plain rotation plus a `warning` naming the parent, never a silent wrong result. The resulting `rotation` is compared to the request (`angleDelta`, ±180-wrap aware) and every node echoes `appliedPivot` and `absoluteBoundingBox`.
 
 ## Running the Server
 

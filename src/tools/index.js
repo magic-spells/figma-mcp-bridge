@@ -113,11 +113,12 @@ import {
   handleAddReaction,
   handleRemoveReaction,
   handleSetFlowStartingPoint,
-  // Visibility / clipping / style deletion / variable modes
+  // Visibility / clipping / style deletion / variable modes / size limits
   handleSetVisible,
   handleSetClipsContent,
   handleDeleteStyle,
-  handleSetVariableMode
+  handleSetVariableMode,
+  handleSetSizeLimits
 } from './mutations.js';
 
 // Read package.json once at module load — used by figma_server_info to surface the running version
@@ -346,13 +347,41 @@ export function registerTools(server, bridge) {
   // figma_resize_nodes - Resize nodes
   server.tool(
     'figma_resize_nodes',
-    'Resize one or more nodes. At least one dimension (width or height) must be provided.',
+    'Resize one or more nodes to an explicit pixel size. At least one dimension (width or height) must be provided. ' +
+    'PREFER figma_set_layout_align with STRETCH when the goal is "size this child to its parent" — STRETCH works ' +
+    'inside instances, survives breakpoint changes, and PRESERVES width/height variable binds; an explicit resize does not. ' +
+    'Safety behavior of this tool: (1) resizing an instance sublayer is rejected up front with INSTANCE_SUBLAYER_RESTRICTED ' +
+    '(Figma silently ignores it); (2) width/height/min/max variable binds are captured before the resize and re-applied ' +
+    'afterwards — recovered binds are listed in "rebound", destroyed ones that could not be recovered are named in "warnings"; ' +
+    '(3) the resulting size is read back and compared to the request — a no-op returns success: false with a RESIZE_NO_OP ' +
+    'error, and a clamped result (min/max limits, auto-layout sizing) is reported in "warnings". Each node echoes ' +
+    '"requested" and "actual" sizes.',
     {
-      nodeIds: z.array(z.string()).describe('Array of node IDs to resize'),
+      nodeIds: z.array(z.string()).describe('Array of node IDs to resize. Instance sublayers are rejected — resize the component master instead.'),
       width: z.number().optional().describe('New width in pixels'),
       height: z.number().optional().describe('New height in pixels')
     },
     async (args) => handleResizeNodes(bridge, args)
+  );
+
+  // figma_set_size_limits - Set or clear min/max width/height
+  server.tool(
+    'figma_set_size_limits',
+    'Set or CLEAR the min/max size limits (minWidth, maxWidth, minHeight, maxHeight) on one or more nodes. ' +
+    'Pass a positive number to set a limit, or explicit null to remove it — null is the documented way to clear a limit, ' +
+    'so max-width is no longer a one-way door. Limits apply to auto-layout frames and their direct children; a node that ' +
+    'is neither gets a warning because Figma may ignore the value. Every write is read back and verified: a limit that ' +
+    'did not apply returns success: false with LIMIT_NOT_APPLIED, and one that would not clear returns LIMIT_NOT_CLEARED. ' +
+    'If the field is variable-bound the bound value wins over the literal — the response warns and points at ' +
+    'figma_unbind_variable, which also clears the residual literal. The response echoes all four limits for each node.',
+    {
+      nodeIds: z.array(z.string()).describe('Array of node IDs to update'),
+      minWidth: z.number().positive().nullable().optional().describe('Minimum width in pixels. null clears the limit. Omit to leave unchanged.'),
+      maxWidth: z.number().positive().nullable().optional().describe('Maximum width in pixels. null clears the limit. Omit to leave unchanged.'),
+      minHeight: z.number().positive().nullable().optional().describe('Minimum height in pixels. null clears the limit. Omit to leave unchanged.'),
+      maxHeight: z.number().positive().nullable().optional().describe('Maximum height in pixels. null clears the limit. Omit to leave unchanged.')
+    },
+    async (args) => handleSetSizeLimits(bridge, args)
   );
 
   // figma_set_opacity - Set node opacity
@@ -559,7 +588,10 @@ export function registerTools(server, bridge) {
   // figma_set_auto_layout - Configure auto-layout
   server.tool(
     'figma_set_auto_layout',
-    'Configure auto-layout on a frame. Enables responsive layouts with automatic spacing and alignment.',
+    'Configure auto-layout on a frame. Enables responsive layouts with automatic spacing and alignment. ' +
+    'Changing layoutMode or primaryAxisSizingMode can clear a width/height variable bind, so the node\'s size binds are ' +
+    'captured before the change and re-applied after: recovered binds are listed in "rebound", and any bind that could ' +
+    'not be restored is named in "warnings" rather than silently lost.',
     {
       nodeId: z.string().describe('The frame node ID to configure'),
       layoutMode: z.enum(['NONE', 'HORIZONTAL', 'VERTICAL']).optional().describe('Layout direction: NONE (disable), HORIZONTAL (row), or VERTICAL (column)'),
@@ -591,7 +623,11 @@ export function registerTools(server, bridge) {
   // figma_apply_style - Apply a style to a node
   server.tool(
     'figma_apply_style',
-    'Apply a local style to a node. Styles provide consistent, reusable design tokens.',
+    'Apply a local style to a node. Styles provide consistent, reusable design tokens. Works for all five style ' +
+    'properties including text — the plugin uses the async setters (setTextStyleIdAsync / setFillStyleIdAsync / ' +
+    'setStrokeStyleIdAsync / setEffectStyleIdAsync / setGridStyleIdAsync) that are mandatory under ' +
+    'documentAccess: "dynamic-page". The applied style ID is read back off the node and returned as appliedStyleId ' +
+    'with verified: true; if the readback does not match, the call fails with STYLE_NOT_APPLIED instead of reporting success.',
     {
       nodeId: z.string().describe('The node ID to apply the style to'),
       styleId: z.string().describe('The style ID to apply'),
@@ -724,7 +760,12 @@ export function registerTools(server, bridge) {
   // figma_set_variable - Set variable value or bind to node
   server.tool(
     'figma_set_variable',
-    'Set the value of an existing variable for a specific mode, or bind a variable to a node property OR to a local style. Styles are supported: pass styleId (or a style ID as nodeId) with field. TEXT styles bind fontFamily, fontSize, fontStyle, fontWeight, letterSpacing, lineHeight, paragraphSpacing, paragraphIndent; PAINT styles bind their color via field "paints". Style binds echo the style\'s boundVariables so the bind is verifiable in the same call.',
+    'Set the value of an existing variable for a specific mode, or bind a variable to a node property OR to a local style. Styles are supported: pass styleId (or a style ID as nodeId) with field. TEXT styles bind fontFamily, fontSize, fontStyle, fontWeight, letterSpacing, lineHeight, paragraphSpacing, paragraphIndent; PAINT styles bind their color via field "paints". Style binds echo the style\'s boundVariables so the bind is verifiable in the same call. ' +
+    'Node binds are VERIFIED: after binding, node.boundVariables is re-read and the response returns it with verified: true. ' +
+    'If the bind did not land, the call fails with BIND_NOT_APPLIED rather than reporting success — this catches Figma\'s ' +
+    'silent no-ops. Binding "width" or "height" on an instance sublayer is rejected up front with ' +
+    'INSTANCE_SUBLAYER_RESTRICTED: Figma does not allow that override, so bind it on the component master instead (or size ' +
+    'the sublayer with figma_set_layout_align: STRETCH).',
     {
       variableId: z.string().describe('The variable ID to set or bind'),
       modeId: z.string().optional().describe('Mode ID to set value for (required when setting value)'),
@@ -1121,10 +1162,14 @@ export function registerTools(server, bridge) {
   // figma_unbind_variable - Remove variable binding from a node
   server.tool(
     'figma_unbind_variable',
-    'Remove a variable binding from a node property.',
+    'Remove a variable binding from a node property. The unbind is verified by readback (UNBIND_FAILED if the field is ' +
+    'still bound) and the response echoes the node\'s remaining boundVariables. ' +
+    'Special handling for minWidth / maxWidth / minHeight / maxHeight: unbinding one of these leaves the last resolved ' +
+    'number behind as a hard literal clamp, so the literal is cleared to null too — the response reports previousLiteral ' +
+    'and clearedLiteral. Set a new limit with figma_set_size_limits.',
     {
       nodeId: z.string().describe('The node ID to unbind from'),
-      field: z.string().describe('The field to unbind (fills, strokes, opacity, cornerRadius, etc.)'),
+      field: z.string().describe('The field to unbind (fills, strokes, opacity, cornerRadius, minWidth, maxWidth, etc.)'),
       paintIndex: z.number().optional().default(0).describe('Paint array index for fills/strokes')
     },
     async (args) => handleUnbindVariable(bridge, args)
@@ -1240,10 +1285,18 @@ export function registerTools(server, bridge) {
   // figma_set_rotation - Set rotation on nodes
   server.tool(
     'figma_set_rotation',
-    'Set the rotation (in degrees) of one or more nodes. Rotation is around the center point.',
+    'Set the rotation (in degrees) of one or more nodes. pivot defaults to "center", which keeps the node\'s visual ' +
+    'centre in place by writing relativeTransform. pivot: "top-left" is Figma\'s raw node.rotation behavior, which ' +
+    'rotates about the top-left corner and therefore MOVES the visual centre. ' +
+    'Limitation: an auto-layout parent computes its children\'s positions and ignores the translation part of ' +
+    'relativeTransform, so a centre pivot is impossible on a non-ABSOLUTE auto-layout child — those nodes get a ' +
+    'top-left rotation plus an explicit warning naming the parent (set layoutPositioning: ABSOLUTE, or wrap the node ' +
+    'in a plain frame, to get a true centre pivot). Each node echoes appliedPivot, its resulting rotation, and its ' +
+    'absoluteBoundingBox so the pivot can be verified.',
     {
       nodeIds: z.array(z.string()).describe('Array of node IDs to rotate'),
-      rotation: z.number().min(-180).max(180).describe('Rotation in degrees (-180 to 180)')
+      rotation: z.number().min(-180).max(180).describe('Rotation in degrees (-180 to 180)'),
+      pivot: z.enum(['center', 'top-left']).optional().default('center').describe('Point to rotate about. "center" (default) preserves the node\'s visual centre; "top-left" is Figma\'s raw node.rotation behavior.')
     },
     async (args) => handleSetRotation(bridge, args)
   );
@@ -1294,7 +1347,7 @@ export function registerTools(server, bridge) {
   // figma_create_sticky - Create a sticky note
   server.tool(
     'figma_create_sticky',
-    'FigJam: create a sticky note. Default size is fixed (240×240); width/height are not configurable. Text is set via the embedded sublayer (font auto-loaded). Note: the author name and visibility are auto-populated by Figma from the active user — they cannot be set programmatically.',
+    'FigJam only: create a sticky note. Default size is fixed (240×240); width/height are not configurable. Text is set via the embedded sublayer (font auto-loaded). Note: the author name and visibility are auto-populated by Figma from the active user — they cannot be set programmatically.',
     {
       x: z.number().optional().default(0).describe('X position'),
       y: z.number().optional().default(0).describe('Y position'),
@@ -1309,7 +1362,7 @@ export function registerTools(server, bridge) {
   // figma_set_sticky - Update a sticky's metadata
   server.tool(
     'figma_set_sticky',
-    'FigJam: toggle a sticky note between square (240×240) and wide-rectangle variants. Use figma_set_text to change the body text. (Author name/visibility are read-only at runtime — Figma sets them from the active user.)',
+    'FigJam only: toggle a sticky note between square (240×240) and wide-rectangle variants. Use figma_set_text to change the body text. (Author name/visibility are read-only at runtime — Figma sets them from the active user.)',
     {
       nodeId: z.string().describe('The STICKY node ID'),
       isWideWidth: z.boolean().optional().describe('Wide vs square sticky')
@@ -1320,7 +1373,7 @@ export function registerTools(server, bridge) {
   // figma_create_shape_with_text - Create a flowchart shape with embedded text
   server.tool(
     'figma_create_shape_with_text',
-    'FigJam: create a flowchart shape with embedded text (process box, decision diamond, database cylinder, etc.). 30 shape types are available — use ROUNDED_RECTANGLE for processes, DIAMOND for decisions, ENG_DATABASE for data stores. cornerRadius is fixed and cannot be set.',
+    'FigJam only: create a flowchart shape with embedded text (process box, decision diamond, database cylinder, etc.). 30 shape types are available — use ROUNDED_RECTANGLE for processes, DIAMOND for decisions, ENG_DATABASE for data stores. cornerRadius is fixed and cannot be set.',
     {
       x: z.number().optional().default(0).describe('X position'),
       y: z.number().optional().default(0).describe('Y position'),
@@ -1339,7 +1392,7 @@ export function registerTools(server, bridge) {
   // figma_set_shape_type - Change the shape variant
   server.tool(
     'figma_set_shape_type',
-    'FigJam: change the shape type of an existing shape-with-text node (e.g., turn a ROUNDED_RECTANGLE into a DIAMOND).',
+    'FigJam only: change the shape type of an existing shape-with-text node (e.g., turn a ROUNDED_RECTANGLE into a DIAMOND).',
     {
       nodeId: z.string().describe('The SHAPE_WITH_TEXT node ID'),
       shapeType: z.enum(SHAPE_TYPES).describe('New shape type')
@@ -1350,7 +1403,7 @@ export function registerTools(server, bridge) {
   // figma_create_connector - Create an arrow/connector between nodes
   server.tool(
     'figma_create_connector',
-    'FigJam: create a connector (arrow line) between two nodes for flowcharts and diagrams. Endpoints can attach to nodes via magnets (AUTO recommended), to fixed positions on nodes, or be free-floating on the canvas. Default end cap is ARROW_EQUILATERAL so it looks like an arrow without configuration. ELBOWED is best for orthogonal flowcharts; STRAIGHT only supports CENTER/NONE magnets.',
+    'FigJam only: create a connector (arrow line) between two nodes for flowcharts and diagrams. Endpoints can attach to nodes via magnets (AUTO recommended), to fixed positions on nodes, or be free-floating on the canvas. Default end cap is ARROW_EQUILATERAL so it looks like an arrow without configuration. ELBOWED is best for orthogonal flowcharts; STRAIGHT only supports CENTER/NONE magnets.',
     {
       start: connectorEndpointSchema.optional().describe('Start endpoint: { nodeId, magnet } | { nodeId, position } | { position }'),
       end: connectorEndpointSchema.optional().describe('End endpoint: { nodeId, magnet } | { nodeId, position } | { position }'),
@@ -1368,7 +1421,7 @@ export function registerTools(server, bridge) {
   // figma_set_connector - Update an existing connector
   server.tool(
     'figma_set_connector',
-    'FigJam: modify an existing connector\'s endpoints, line type, end caps, or label.',
+    'FigJam only: modify an existing connector\'s endpoints, line type, end caps, or label.',
     {
       nodeId: z.string().describe('The CONNECTOR node ID'),
       start: connectorEndpointSchema.optional().describe('Replacement start endpoint'),
@@ -1417,7 +1470,7 @@ export function registerTools(server, bridge) {
   // figma_create_table - Create a table
   server.tool(
     'figma_create_table',
-    'FigJam: create a table for documentation or structured data. Optionally seed initial cell content via the cells array. Defaults to 2×2.',
+    'FigJam only: create a table for documentation or structured data. Optionally seed initial cell content via the cells array. Defaults to 2×2.',
     {
       x: z.number().optional().default(0).describe('X position'),
       y: z.number().optional().default(0).describe('Y position'),
@@ -1438,7 +1491,7 @@ export function registerTools(server, bridge) {
   // figma_set_table_cell - Set the text/fill of a table cell
   server.tool(
     'figma_set_table_cell',
-    'FigJam: set the text and/or fill color of a single table cell.',
+    'FigJam only: set the text and/or fill color of a single table cell.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       row: z.number().int().min(0).describe('Row index (0-based)'),
@@ -1452,7 +1505,7 @@ export function registerTools(server, bridge) {
   // figma_insert_table_row - Insert a row before the given index
   server.tool(
     'figma_insert_table_row',
-    'FigJam: insert a row at the given index (existing rows at and after the index shift down).',
+    'FigJam only: insert a row at the given index (existing rows at and after the index shift down).',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       rowIndex: z.number().int().min(0).describe('Insert position (0 = top)')
@@ -1463,7 +1516,7 @@ export function registerTools(server, bridge) {
   // figma_insert_table_column - Insert a column before the given index
   server.tool(
     'figma_insert_table_column',
-    'FigJam: insert a column at the given index (existing columns at and after the index shift right).',
+    'FigJam only: insert a column at the given index (existing columns at and after the index shift right).',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       columnIndex: z.number().int().min(0).describe('Insert position (0 = leftmost)')
@@ -1474,7 +1527,7 @@ export function registerTools(server, bridge) {
   // figma_remove_table_row - Remove a row
   server.tool(
     'figma_remove_table_row',
-    'FigJam: remove the row at the given index.',
+    'FigJam only: remove the row at the given index.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       rowIndex: z.number().int().min(0).describe('Row to remove')
@@ -1485,7 +1538,7 @@ export function registerTools(server, bridge) {
   // figma_remove_table_column - Remove a column
   server.tool(
     'figma_remove_table_column',
-    'FigJam: remove the column at the given index.',
+    'FigJam only: remove the column at the given index.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       columnIndex: z.number().int().min(0).describe('Column to remove')
@@ -1496,7 +1549,7 @@ export function registerTools(server, bridge) {
   // figma_resize_table_row - Set row height
   server.tool(
     'figma_resize_table_row',
-    'FigJam: set the height of a table row.',
+    'FigJam only: set the height of a table row.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       rowIndex: z.number().int().min(0).describe('Row index'),
@@ -1508,7 +1561,7 @@ export function registerTools(server, bridge) {
   // figma_resize_table_column - Set column width
   server.tool(
     'figma_resize_table_column',
-    'FigJam: set the width of a table column.',
+    'FigJam only: set the width of a table column.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       columnIndex: z.number().int().min(0).describe('Column index'),
@@ -1520,7 +1573,7 @@ export function registerTools(server, bridge) {
   // figma_move_table_row - Reorder rows
   server.tool(
     'figma_move_table_row',
-    'FigJam: move a row from one index to another.',
+    'FigJam only: move a row from one index to another.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       fromIndex: z.number().int().min(0).describe('Source row index'),
@@ -1532,7 +1585,7 @@ export function registerTools(server, bridge) {
   // figma_move_table_column - Reorder columns
   server.tool(
     'figma_move_table_column',
-    'FigJam: move a column from one index to another.',
+    'FigJam only: move a column from one index to another.',
     {
       nodeId: z.string().describe('The TABLE node ID'),
       fromIndex: z.number().int().min(0).describe('Source column index'),
@@ -1544,7 +1597,7 @@ export function registerTools(server, bridge) {
   // figma_create_code_block - Create a syntax-highlighted code block
   server.tool(
     'figma_create_code_block',
-    'FigJam: create a syntax-highlighted code block for documentation. Code is a plain string property (no font loading required).',
+    'FigJam only: create a syntax-highlighted code block for documentation. Code is a plain string property (no font loading required).',
     {
       x: z.number().optional().default(0).describe('X position'),
       y: z.number().optional().default(0).describe('Y position'),
@@ -1558,7 +1611,7 @@ export function registerTools(server, bridge) {
   // figma_set_code_block - Update a code block
   server.tool(
     'figma_set_code_block',
-    'FigJam: update an existing code block\'s code text or language.',
+    'FigJam only: update an existing code block\'s code text or language.',
     {
       nodeId: z.string().describe('The CODE_BLOCK node ID'),
       code: z.string().optional().describe('New code text'),
@@ -1570,7 +1623,7 @@ export function registerTools(server, bridge) {
   // figma_create_link_preview - Embed a URL (auto-detects iframe vs. card)
   server.tool(
     'figma_create_link_preview',
-    'FigJam: create a rich link preview from a URL. Returns either an EMBED (iframe; works for OEmbed providers like YouTube/Spotify) or a LINK_UNFURL (rich card from OpenGraph/Twitter Card metadata) — the response includes nodeType so you know which.',
+    'FigJam only: create a rich link preview from a URL. Returns either an EMBED (iframe; works for OEmbed providers like YouTube/Spotify) or a LINK_UNFURL (rich card from OpenGraph/Twitter Card metadata) — the response includes nodeType so you know which.',
     {
       x: z.number().optional().default(0).describe('X position'),
       y: z.number().optional().default(0).describe('Y position'),
@@ -1585,7 +1638,7 @@ export function registerTools(server, bridge) {
   // figma_get_reactions - Read all reactions on a node
   server.tool(
     'figma_get_reactions',
-    'Prototype: get all reactions (interactions) on a node. Returns the full reactions array with trigger and action details.',
+    'Prototype (Figma Design only): get all reactions (interactions) on a node. Returns the full reactions array with trigger and action details.',
     {
       nodeId: z.string().describe('Node ID to read reactions from')
     },
@@ -1595,7 +1648,7 @@ export function registerTools(server, bridge) {
   // figma_add_reaction - Add a prototype interaction to a node
   server.tool(
     'figma_add_reaction',
-    'Prototype: add a reaction (interaction) to a node. A reaction pairs a trigger with an action. Existing reactions are preserved.\n\nTrigger types: ON_CLICK, ON_HOVER, ON_PRESS, ON_DRAG, ON_MEDIA_END, AFTER_TIMEOUT, MOUSE_UP, MOUSE_DOWN, MOUSE_ENTER, MOUSE_LEAVE, ON_KEY_DOWN, ON_MEDIA_HIT.\n\nAction types: NODE (navigate/overlay/scroll — set navigation field), BACK, CLOSE, URL.\n\nFor NODE actions, navigation values: NAVIGATE (go to frame), SWAP (replace current frame), OVERLAY (open as overlay), SCROLL_TO (scroll to frame), CHANGE_TO (change component variant).',
+    'Prototype (Figma Design only): add a reaction (interaction) to a node. A reaction pairs a trigger with an action. Existing reactions are preserved.\n\nTrigger types: ON_CLICK, ON_HOVER, ON_PRESS, ON_DRAG, ON_MEDIA_END, AFTER_TIMEOUT, MOUSE_UP, MOUSE_DOWN, MOUSE_ENTER, MOUSE_LEAVE, ON_KEY_DOWN, ON_MEDIA_HIT.\n\nAction types: NODE (navigate/overlay/scroll — set navigation field), BACK, CLOSE, URL.\n\nFor NODE actions, navigation values: NAVIGATE (go to frame), SWAP (replace current frame), OVERLAY (open as overlay), SCROLL_TO (scroll to frame), CHANGE_TO (change component variant).',
     {
       nodeId: z.string().describe('Node ID to add the reaction to'),
       trigger: z.object({
@@ -1640,7 +1693,7 @@ export function registerTools(server, bridge) {
   // figma_remove_reaction - Remove a reaction by index
   server.tool(
     'figma_remove_reaction',
-    'Prototype: remove a reaction from a node by its zero-based index in the reactions array. Use figma_get_reactions first to find the index.',
+    'Prototype (Figma Design only): remove a reaction from a node by its zero-based index in the reactions array. Use figma_get_reactions first to find the index.',
     {
       nodeId: z.string().describe('Node ID to remove the reaction from'),
       index: z.number().int().min(0).describe('Zero-based index of the reaction to remove')
@@ -1651,7 +1704,7 @@ export function registerTools(server, bridge) {
   // figma_set_flow_starting_point - Set or clear a prototype flow starting point
   server.tool(
     'figma_set_flow_starting_point',
-    'Prototype: set a top-level frame as a prototype flow starting point on the current page, or clear it. Flow starting points are page-level — Figma stores them as { nodeId, name } entries on the page.',
+    'Prototype (Figma Design only): set a top-level frame as a prototype flow starting point on the current page, or clear it. Flow starting points are page-level — Figma stores them as { nodeId, name } entries on the page.',
     {
       nodeId: z.string().describe('Frame node ID to set as flow starting point. Must be FRAME, COMPONENT, or COMPONENT_SET.'),
       flowName: z.string().optional().describe('Name for the flow (defaults to "Flow 1" if omitted). If the frame is already a flow starting point, its name is updated.'),

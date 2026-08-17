@@ -94,6 +94,8 @@ async function handleCommand(command, payload) {
       return await setVisible(payload);
     case 'set_clips_content':
       return await setClipsContent(payload);
+    case 'set_size_limits':
+      return await setSizeLimits(payload);
     case 'set_corner_radius':
       return await setCornerRadius(payload);
     case 'group_nodes':
@@ -656,8 +658,20 @@ async function moveNodes({ nodeIds, x, y, relative = false }) {
   };
 }
 
+// Sizes are floats; Figma rounds/clamps. Anything inside this is "the same size".
+const SIZE_EPSILON = 0.01;
+
 /**
- * Resize nodes
+ * Resize nodes.
+ *
+ * Three failure modes this guards against, all of which used to return success:
+ *  - the node is an instance sublayer: resize() is a silent no-op (#16)
+ *  - the node clamps (min/max limits, text auto-resize) so the result differs
+ *  - resize destroys an existing width/height variable bind (#17)
+ *
+ * Everything is validated BEFORE the first mutation so a bad node in the batch
+ * cannot leave the rest half-applied.
+ *
  * @param {string[]} nodeIds - Array of node IDs to resize
  * @param {number} width - New width
  * @param {number} height - New height
@@ -665,7 +679,12 @@ async function moveNodes({ nodeIds, x, y, relative = false }) {
 async function resizeNodes({ nodeIds, width, height }) {
   const resizedNodes = [];
   const notFound = [];
+  const resolved = [];
+  const errors = [];
+  const warnings = [];
+  const reboundAll = [];
 
+  // ---- Phase 1: resolve + validate, no mutation yet ----
   for (const nodeId of nodeIds) {
     const node = await figma.getNodeByIdAsync(nodeId);
     if (!node) {
@@ -674,21 +693,93 @@ async function resizeNodes({ nodeIds, width, height }) {
     }
 
     if (!('resize' in node)) {
-      throw new Error(`Node ${nodeId} does not support resizing`);
+      throw new Error(`Node ${nodeId} (${node.type}) does not support resizing`);
     }
 
-    const newWidth = width !== undefined ? width : node.width;
-    const newHeight = height !== undefined ? height : node.height;
-    node.resize(newWidth, newHeight);
+    // #16 — resize() on an instance sublayer reports success and does nothing.
+    assertNotInstanceSublayer(
+      node,
+      'Resizing',
+      'Resize the layer on the component master instead, or size this sublayer from its parent ' +
+      'with figma_set_layout_align: STRETCH (which works inside instances and preserves variable binds).'
+    );
 
-    resizedNodes.push(serializeNode(node, 'full'));
+    resolved.push(node);
   }
 
-  return {
-    success: true,
+  // ---- Phase 2: mutate, with bind capture/restore and readback verification ----
+  for (const node of resolved) {
+    const newWidth = width !== undefined ? width : node.width;
+    const newHeight = height !== undefined ? height : node.height;
+
+    const beforeWidth = node.width;
+    const beforeHeight = node.height;
+    // #17 — capture size binds first; whether resize clears them is undocumented.
+    const capturedBinds = captureSizeBinds(node);
+
+    node.resize(newWidth, newHeight);
+
+    const restored = await restoreSizeBinds(node, capturedBinds);
+    const nodeWarnings = describeLostBinds(node, restored.lost);
+
+    for (const entry of restored.rebound) {
+      reboundAll.push({
+        nodeId: node.id,
+        field: entry.field,
+        variableId: entry.variableId,
+        variableName: entry.variableName
+      });
+    }
+
+    // Verify the size actually changed to what was asked for.
+    const widthOk = Math.abs(node.width - newWidth) <= SIZE_EPSILON;
+    const heightOk = Math.abs(node.height - newHeight) <= SIZE_EPSILON;
+
+    if (!widthOk || !heightOk) {
+      const unchanged =
+        Math.abs(node.width - beforeWidth) <= SIZE_EPSILON &&
+        Math.abs(node.height - beforeHeight) <= SIZE_EPSILON;
+
+      const detail = `requested ${newWidth}×${newHeight}, node is ${node.width}×${node.height}`;
+
+      if (unchanged) {
+        errors.push({
+          nodeId: node.id,
+          code: 'RESIZE_NO_OP',
+          message: `resize() on node ${node.id} ("${node.name}", ${node.type}) did nothing — ${detail}. ` +
+            'The size is being controlled elsewhere: check layoutSizingHorizontal/Vertical (HUG/FILL ignore ' +
+            'an explicit size), min/max size limits (clear them with figma_set_size_limits), or a parent ' +
+            'auto-layout that owns this axis.'
+        });
+      } else {
+        nodeWarnings.push(
+          `Resize was clamped on node ${node.id} ("${node.name}") — ${detail}. ` +
+          'Likely a min/max size limit (see figma_set_size_limits) or an auto-layout sizing mode.'
+        );
+      }
+    }
+
+    for (const warning of nodeWarnings) {
+      warnings.push(warning);
+    }
+
+    const serialized = serializeNode(node, 'full');
+    serialized.requested = { width: newWidth, height: newHeight };
+    serialized.actual = { width: node.width, height: node.height };
+    if (restored.rebound.length > 0) serialized.rebound = restored.rebound;
+    if (nodeWarnings.length > 0) serialized.warnings = nodeWarnings;
+    resizedNodes.push(serialized);
+  }
+
+  const result = {
+    success: errors.length === 0,
     nodes: resizedNodes,
     notFound
   };
+  if (reboundAll.length > 0) result.rebound = reboundAll;
+  if (warnings.length > 0) result.warnings = warnings;
+  if (errors.length > 0) result.errors = errors;
+  return result;
 }
 
 /**
@@ -1218,6 +1309,10 @@ async function setAutoLayout(params) {
     throw new Error(`Node ${nodeId} (${node.type}) does not support auto-layout. Only FRAME, COMPONENT, and COMPONENT_SET types are supported.`);
   }
 
+  // #17 — changing layoutMode / primaryAxisSizingMode can clear a width/height
+  // variable bind (undocumented in both directions). Capture, then restore.
+  const capturedBinds = captureSizeBinds(node);
+
   // Apply layout mode first (required to enable other properties)
   if (layoutMode !== undefined) {
     node.layoutMode = layoutMode;
@@ -1240,10 +1335,16 @@ async function setAutoLayout(params) {
     }
   }
 
-  return {
+  const restored = await restoreSizeBinds(node, capturedBinds);
+  const warnings = describeLostBinds(node, restored.lost);
+
+  const result = {
     success: true,
     node: serializeNode(node, 'full')
   };
+  if (restored.rebound.length > 0) result.rebound = restored.rebound;
+  if (warnings.length > 0) result.warnings = warnings;
+  return result;
 }
 
 /**
@@ -1308,14 +1409,33 @@ async function applyStyle({ nodeId, styleId, property }) {
     grid: 'gridStyleId'
   };
 
+  // Under documentAccess: "dynamic-page" every *StyleId property is READ-ONLY.
+  // Assigning throws "Cannot call with documentAccess: dynamic-page. Use
+  // node.set...Async instead." — the async setter is mandatory, not optional.
+  const asyncSetterMap = {
+    fills: 'setFillStyleIdAsync',
+    strokes: 'setStrokeStyleIdAsync',
+    text: 'setTextStyleIdAsync',
+    effects: 'setEffectStyleIdAsync',
+    grid: 'setGridStyleIdAsync'
+  };
+
   const styleProperty = propertyMap[property];
   if (!styleProperty) {
     throw new Error(`Invalid property: ${property}`);
   }
 
+  const setterName = asyncSetterMap[property];
+
   // Check if node supports this style type
   if (!(styleProperty in node)) {
     throw new Error(`Node ${nodeId} (${node.type}) does not support ${property} styles`);
+  }
+
+  if (typeof node[setterName] !== 'function') {
+    const err = new Error(`Node ${nodeId} (${node.type}) exposes ${styleProperty} but not ${setterName}(), which is required under documentAccess: "dynamic-page". Cannot apply a ${property} style to this node type.`);
+    err.code = 'STYLE_SETTER_UNAVAILABLE';
+    throw err;
   }
 
   // Validate style type matches property
@@ -1331,16 +1451,40 @@ async function applyStyle({ nodeId, styleId, property }) {
     throw new Error(`Style type mismatch: expected ${styleTypeMap[property]} style for ${property}, got ${style.type}`);
   }
 
-  // Apply the style
-  node[styleProperty] = styleId;
+  // Apply the style via the async setter, using the style's canonical id
+  // (user-supplied ids sometimes omit the trailing comma Figma appends).
+  await node[setterName](style.id);
+
+  // Verify the write landed. textStyleId / fillStyleId can read back as
+  // figma.mixed (a Symbol) — treat anything non-string as "not applied".
+  const applied = node[styleProperty];
+  const appliedId = typeof applied === 'string' ? applied : null;
+
+  if (normalizeStyleId(appliedId) !== normalizeStyleId(style.id)) {
+    const err = new Error(`${setterName}() reported no error but ${styleProperty} on node ${nodeId} reads back as ${appliedId === null ? 'MIXED/unset' : '"' + appliedId + '"'}, not "${style.id}". The style was NOT applied.`);
+    err.code = 'STYLE_NOT_APPLIED';
+    throw err;
+  }
 
   return {
     success: true,
     nodeId: node.id,
     property,
-    styleId,
-    styleName: style.name
+    styleId: style.id,
+    styleName: style.name,
+    // Read back from the node, not echoed from the request — proof of the write.
+    appliedStyleId: appliedId,
+    verified: true
   };
+}
+
+/**
+ * Style IDs round-trip with an inconsistent trailing comma ("S:abc," vs "S:abc").
+ * Normalize before comparing a readback to a requested id.
+ */
+function normalizeStyleId(id) {
+  if (typeof id !== 'string') return null;
+  return id.replace(/,+$/, '');
 }
 
 /**
@@ -2245,6 +2389,21 @@ async function setVariable(params) {
       currentPaints[paintIndex] = boundPaint;
       node[field] = currentPaints;
 
+      // Verify — setBoundVariableForPaint returns a copy, so a missed reassign
+      // (or a rejected override) would otherwise look like success.
+      var verifyPaints = node[field];
+      var verifyPaint = Array.isArray(verifyPaints) ? verifyPaints[paintIndex] : null;
+      var paintAlias = verifyPaint && verifyPaint.boundVariables ? verifyPaint.boundVariables.color : null;
+      if (!paintAlias || paintAlias.id !== variable.id) {
+        var paintErr = new Error(
+          'Bind of variable "' + variable.name + '" (' + variable.id + ') to ' + field +
+          '[' + paintIndex + '] on node ' + node.id + ' did not take effect — the paint reads back ' +
+          (paintAlias ? 'bound to ' + paintAlias.id : 'with no color bind') + '. Nothing was changed.'
+        );
+        paintErr.code = 'BIND_NOT_APPLIED';
+        throw paintErr;
+      }
+
       return {
         success: true,
         operation: 'bindToNode',
@@ -2252,7 +2411,9 @@ async function setVariable(params) {
         variableName: variable.name,
         nodeId: node.id,
         field: field,
-        paintIndex: paintIndex
+        paintIndex: paintIndex,
+        verified: true,
+        boundVariables: clone(node.boundVariables) || {}
       };
     }
 
@@ -2270,8 +2431,44 @@ async function setVariable(params) {
       throw new Error('Node ' + nodeId + ' (' + node.type + ') does not have field "' + field + '"');
     }
 
+    // #15 — a width/height bind on an instance sublayer reports success and does
+    // nothing. Block it explicitly rather than papering over Figma's restriction.
+    if (field === 'width' || field === 'height') {
+      assertNotInstanceSublayer(
+        node,
+        'Binding a variable to "' + field + '"',
+        'Bind ' + field + ' on the component master instead (the instance will inherit it), or let the ' +
+        'parent own the size: figma_set_layout_align: STRETCH works inside instances and preserves binds.'
+      );
+    }
+
     // Bind the variable
     node.setBoundVariable(field, variable);
+
+    // General anti-silent-failure net: prove the bind landed before claiming
+    // success. Applies to every node bind, not just the size fields.
+    var landed = readBoundAlias(node, field);
+    if (!landed) {
+      var missingErr = new Error(
+        'Bind of variable "' + variable.name + '" (' + variable.id + ') to "' + field + '" on node ' +
+        node.id + ' (' + node.type + ') reported no error but does not read back in ' +
+        'node.boundVariables. Nothing was changed.' +
+        (findInstanceAncestor(node) ? ' This node is a sublayer of instance "' + findInstanceAncestor(node).name +
+          '" — Figma restricts which fields can be overridden inside an instance; bind it on the component master instead.' : '')
+      );
+      missingErr.code = 'BIND_NOT_APPLIED';
+      throw missingErr;
+    }
+
+    if (landed.id !== variable.id) {
+      var mismatchErr = new Error(
+        'Bind of variable "' + variable.name + '" (' + variable.id + ') to "' + field + '" on node ' +
+        node.id + ' did not take effect — the field reads back bound to a different variable (' +
+        landed.id + ').'
+      );
+      mismatchErr.code = 'BIND_NOT_APPLIED';
+      throw mismatchErr;
+    }
 
     return {
       success: true,
@@ -2279,7 +2476,10 @@ async function setVariable(params) {
       variableId: variable.id,
       variableName: variable.name,
       nodeId: node.id,
-      field: field
+      field: field,
+      verified: true,
+      // Read back from the node — proof the bind is live, not an echo of the request.
+      boundVariables: clone(node.boundVariables) || {}
     };
   }
 
@@ -2901,12 +3101,47 @@ async function reorderNode({ nodeId, position }) {
 // ============================================================
 
 /**
- * Throws if not running in FigJam. Used to gate FigJam-only commands.
+ * figma.editorType has FIVE values, not two: 'figma' | 'figjam' | 'dev' |
+ * 'slides' | 'buzz'. Guards must use an explicit allow-list — "not figjam" would
+ * wrongly admit Dev Mode, Slides and Buzz, none of which is a design file.
  */
-function requireFigJam() {
+var EDITOR_TYPE_LABELS = {
+  figma: 'a Figma Design file',
+  figjam: 'a FigJam file',
+  dev: 'Figma Dev Mode (read-only for document edits)',
+  slides: 'Figma Slides',
+  buzz: 'Figma Buzz'
+};
+
+/**
+ * Human-readable description of the editor the plugin is currently running in.
+ */
+function describeCurrentEditor() {
+  var type = figma.editorType;
+  var label = EDITOR_TYPE_LABELS[type];
+  if (!label) {
+    return 'an unrecognized editor (editorType: "' + type + '")';
+  }
+  return label + ' (editorType: "' + type + '")';
+}
+
+/**
+ * Throws if not running in FigJam. Used to gate FigJam-only commands.
+ * @param {string} toolName - MCP tool name, so the error names the tool that failed
+ */
+function requireFigJam(toolName) {
   if (figma.editorType !== 'figjam') {
-    var err = new Error('This command requires a FigJam file (current editor: ' + figma.editorType + ')');
+    var subject = toolName ? toolName + ' is FigJam only' : 'This command is FigJam only';
+    var err = new Error(
+      subject + ' — it operates on a FigJam-only node type (STICKY, SHAPE_WITH_TEXT, ' +
+      'CONNECTOR, TABLE, CODE_BLOCK, EMBED/LINK_UNFURL), which cannot exist outside FigJam. ' +
+      'The plugin is currently running in ' + describeCurrentEditor() + '. ' +
+      'Open a FigJam file to use this tool. ' +
+      'In a Figma Design file, build the equivalent from FRAME/RECTANGLE/VECTOR/TEXT nodes instead.'
+    );
     err.code = 'WRONG_EDITOR';
+    err.editorType = figma.editorType;
+    err.tool = toolName || null;
     throw err;
   }
 }
@@ -2915,13 +3150,186 @@ function requireFigJam() {
  * Throws if not running in a Figma Design file. Used to gate Figma-Design-only
  * commands like figma.createPage() — the FigJam plugin runtime simply doesn't
  * expose those APIs, so calling them returns a cryptic "not a function" error.
+ * Note the check is `!== 'figma'`, so Dev Mode / Slides / Buzz are rejected too.
+ * @param {string} toolName - MCP tool name, so the error names the tool that failed
  */
-function requireFigmaDesign() {
+function requireFigmaDesign(toolName) {
   if (figma.editorType !== 'figma') {
-    var err = new Error('This command requires a Figma Design file (current editor: ' + figma.editorType + ')');
+    var subject = toolName ? toolName + ' is Figma Design only' : 'This command is Figma Design only';
+    var err = new Error(
+      subject + ' — the API it needs is not exposed outside a Figma Design file. ' +
+      'The plugin is currently running in ' + describeCurrentEditor() + '. ' +
+      'Open a Figma Design file to use this tool.'
+    );
     err.code = 'FIGMA_DESIGN_ONLY';
+    err.editorType = figma.editorType;
+    err.tool = toolName || null;
     throw err;
   }
+}
+
+// Node fields whose value Figma refuses to override on an instance sublayer.
+// Writing them "succeeds" and changes nothing, so the bridge blocks them up front.
+var SIZE_BIND_FIELDS = ['width', 'height', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight'];
+
+/**
+ * Walk node.parent upward looking for an INSTANCE ancestor.
+ *
+ * This is the authoritative check for "is this node an instance sublayer".
+ * The `I<instanceId>;<childId>` node-id convention is community lore — it is
+ * documented nowhere in Figma's typings or docs — so it is NOT used here.
+ *
+ * @param {BaseNode} node
+ * @returns {InstanceNode|null} the nearest INSTANCE ancestor, or null
+ */
+function findInstanceAncestor(node) {
+  var current = node && node.parent;
+  while (current) {
+    if (current.type === 'INSTANCE') return current;
+    if (current.type === 'PAGE' || current.type === 'DOCUMENT') return null;
+    current = current.parent;
+  }
+  return null;
+}
+
+/**
+ * Throw INSTANCE_SUBLAYER_RESTRICTED if `node` sits inside an instance.
+ * @param {BaseNode} node
+ * @param {string} operation - what was attempted, for the message
+ * @param {string} remedy - suggested alternative
+ */
+function assertNotInstanceSublayer(node, operation, remedy) {
+  var instance = findInstanceAncestor(node);
+  if (!instance) return;
+
+  var err = new Error(
+    operation + ' is not possible on node ' + node.id + ' ("' + node.name + '"): it is a sublayer of ' +
+    'instance "' + instance.name + '" (' + instance.id + '). Figma does not allow this override on ' +
+    'instance sublayers — the call would report success and change nothing. ' + remedy
+  );
+  err.code = 'INSTANCE_SUBLAYER_RESTRICTED';
+  err.nodeId = node.id;
+  err.instanceId = instance.id;
+  throw err;
+}
+
+/**
+ * Read the VariableAlias currently bound to `field` on `node`, or null.
+ *
+ * Two readback quirks are handled:
+ *  - text fields (fontSize, lineHeight, ...) come back as VariableAlias[] on nodes
+ *  - a cornerRadius bind surfaces on rectangles/frames as the FOUR per-corner keys
+ * @returns {{id: string}|null}
+ */
+function readBoundAlias(node, field) {
+  var bound = node.boundVariables;
+  if (!bound) return null;
+
+  var value = bound[field];
+  if (value === undefined || value === null) {
+    if (field === 'cornerRadius') {
+      var corners = ['topLeftRadius', 'topRightRadius', 'bottomLeftRadius', 'bottomRightRadius'];
+      for (var i = 0; i < corners.length; i++) {
+        var corner = bound[corners[i]];
+        if (corner) {
+          return Array.isArray(corner) ? (corner.length > 0 ? corner[0] : null) : corner;
+        }
+      }
+    }
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value[0] : null;
+  }
+  return value;
+}
+
+/**
+ * Snapshot the variable IDs bound to the six size fields on a node.
+ * Whether resize() or a layoutMode change clears these is UNDOCUMENTED in both
+ * directions, so the bridge captures before, re-reads after, and re-applies.
+ * @returns {Object} { [field]: variableId }
+ */
+function captureSizeBinds(node) {
+  var captured = {};
+  if (!node || !node.boundVariables) return captured;
+
+  for (var i = 0; i < SIZE_BIND_FIELDS.length; i++) {
+    var field = SIZE_BIND_FIELDS[i];
+    var alias = readBoundAlias(node, field);
+    if (alias && alias.id) {
+      captured[field] = alias.id;
+    }
+  }
+  return captured;
+}
+
+/**
+ * Re-apply any size bind in `captured` that no longer reads back on the node,
+ * then verify the re-apply landed.
+ * @param {SceneNode} node
+ * @param {Object} captured - output of captureSizeBinds()
+ * @returns {{rebound: Array, lost: Array}} lost entries are honest failures
+ */
+async function restoreSizeBinds(node, captured) {
+  var rebound = [];
+  var lost = [];
+  var fields = Object.keys(captured);
+
+  for (var i = 0; i < fields.length; i++) {
+    var field = fields[i];
+    var expectedId = captured[field];
+
+    var current = readBoundAlias(node, field);
+    if (current && current.id === expectedId) continue; // survived the mutation
+
+    var variable = null;
+    try {
+      variable = await figma.variables.getVariableByIdAsync(expectedId);
+    } catch (err) {
+      variable = null;
+    }
+
+    if (!variable) {
+      lost.push({ field: field, variableId: expectedId, reason: 'variable could not be resolved' });
+      continue;
+    }
+
+    try {
+      node.setBoundVariable(field, variable);
+    } catch (err) {
+      lost.push({ field: field, variableId: expectedId, variableName: variable.name, reason: err.message });
+      continue;
+    }
+
+    var after = readBoundAlias(node, field);
+    if (after && after.id === expectedId) {
+      rebound.push({ field: field, variableId: expectedId, variableName: variable.name });
+    } else {
+      lost.push({
+        field: field,
+        variableId: expectedId,
+        variableName: variable.name,
+        reason: 'setBoundVariable reported no error but the bind did not read back'
+      });
+    }
+  }
+
+  return { rebound: rebound, lost: lost };
+}
+
+/**
+ * Turn restoreSizeBinds() "lost" entries into human-readable warnings.
+ */
+function describeLostBinds(node, lost) {
+  return lost.map(function (entry) {
+    return 'Variable bind on "' + entry.field + '" (' +
+      (entry.variableName ? '"' + entry.variableName + '" ' : '') + entry.variableId +
+      ') was destroyed on node ' + node.id + ' ("' + node.name + '") and could NOT be restored: ' +
+      entry.reason + '. The node now holds a frozen literal. Re-bind it manually, or size the node ' +
+      'with figma_set_layout_align: STRETCH instead, which preserves binds.';
+  });
 }
 
 /**
@@ -3617,11 +4025,229 @@ async function unbindVariable({ nodeId, field, paintIndex }) {
     };
   }
 
-  return {
+  // Verify the unbind landed rather than reporting success on faith.
+  var stillBound = readBoundAlias(node, field);
+  if (stillBound) {
+    return {
+      error: {
+        code: 'UNBIND_FAILED',
+        message: 'setBoundVariable(' + field + ', null) reported no error but node ' + node.id +
+          ' still reads back bound to ' + stillBound.id + '. Nothing was changed.'
+      }
+    };
+  }
+
+  var response = {
     success: true,
     nodeId: node.id,
-    field: field
+    field: field,
+    verified: true,
+    boundVariables: clone(node.boundVariables) || {}
   };
+
+  // #18 — unbinding a min/max size field leaves the resolved number behind as a
+  // hard literal clamp, which is invisible and impossible to undo without a
+  // setter. Clear the literal too, and say so.
+  if (MIN_MAX_SIZE_FIELDS.indexOf(field) !== -1 && field in node) {
+    var residual = node[field];
+    response.previousLiteral = residual === undefined ? null : residual;
+
+    if (residual !== null && residual !== undefined) {
+      try {
+        node[field] = null;
+      } catch (clearErr) {
+        response.clearedLiteral = false;
+        response.warning = 'The variable bind on "' + field + '" was removed, but the resolved literal (' +
+          residual + ') could not be cleared: ' + clearErr.message +
+          '. That number is still acting as a hard clamp on this node. Clear it with ' +
+          'figma_set_size_limits({ nodeIds: ["' + node.id + '"], ' + field + ': null }).';
+        return response;
+      }
+
+      var afterClear = node[field];
+      if (afterClear === null || afterClear === undefined) {
+        response.clearedLiteral = true;
+        response.note = 'Unbinding "' + field + '" leaves the resolved value behind as a hard literal clamp, ' +
+          'so the literal (' + residual + ') was cleared to null as well. Set a new limit with figma_set_size_limits.';
+      } else {
+        response.clearedLiteral = false;
+        response.warning = 'The variable bind on "' + field + '" was removed and the literal was set to null, ' +
+          'but it reads back as ' + afterClear + ' — it is still clamping this node. ' +
+          'This node may not support min/max size limits (they apply to auto-layout frames and their direct children).';
+      }
+    } else {
+      response.clearedLiteral = false;
+      response.note = 'No residual literal was left behind on "' + field + '"; it is already null.';
+    }
+  }
+
+  return response;
+}
+
+// The four clamp fields. Unbinding one leaves its resolved number behind as a
+// literal, and `null` is the documented way to clear it.
+var MIN_MAX_SIZE_FIELDS = ['minWidth', 'maxWidth', 'minHeight', 'maxHeight'];
+
+/**
+ * Set or clear explicit min/max size limits on nodes.
+ *
+ * Documented behavior: minWidth/maxWidth/minHeight/maxHeight are writable, must
+ * be positive, and assigning `null` REMOVES the limit. They apply to auto-layout
+ * frames and their direct children.
+ *
+ * @param {string[]} nodeIds - Nodes to update
+ * @param {number|null} minWidth  - number to set, null to clear, omit to leave alone
+ * @param {number|null} maxWidth
+ * @param {number|null} minHeight
+ * @param {number|null} maxHeight
+ */
+async function setSizeLimits(params) {
+  var nodeIds = params.nodeIds;
+
+  // Only fields actually present in the payload are touched; `null` means clear.
+  var requested = {};
+  for (var f = 0; f < MIN_MAX_SIZE_FIELDS.length; f++) {
+    var name = MIN_MAX_SIZE_FIELDS[f];
+    if (Object.prototype.hasOwnProperty.call(params, name) && params[name] !== undefined) {
+      requested[name] = params[name];
+    }
+  }
+
+  var requestedFields = Object.keys(requested);
+  if (requestedFields.length === 0) {
+    var noFieldErr = new Error(
+      'At least one of minWidth, maxWidth, minHeight, maxHeight must be provided. ' +
+      'Pass a number to set a limit, or null to clear it.'
+    );
+    noFieldErr.code = 'INVALID_PARAMS';
+    throw noFieldErr;
+  }
+
+  var resolved = [];
+  var notFound = [];
+
+  // Validate everything before mutating anything.
+  for (var i = 0; i < nodeIds.length; i++) {
+    var node = await figma.getNodeByIdAsync(nodeIds[i]);
+    if (!node) {
+      notFound.push(nodeIds[i]);
+      continue;
+    }
+
+    for (var v = 0; v < requestedFields.length; v++) {
+      if (!(requestedFields[v] in node)) {
+        var unsupportedErr = new Error(
+          'Node ' + node.id + ' (' + node.type + ') does not support "' + requestedFields[v] + '". ' +
+          'Min/max size limits apply to auto-layout frames and their direct children.'
+        );
+        unsupportedErr.code = 'FIELD_NOT_SUPPORTED';
+        throw unsupportedErr;
+      }
+    }
+
+    resolved.push(node);
+  }
+
+  var nodes = [];
+  var warnings = [];
+  var errors = [];
+
+  for (var n = 0; n < resolved.length; n++) {
+    var target = resolved[n];
+    var applied = {};
+    var nodeWarnings = [];
+
+    var parent = target.parent;
+    var selfIsAutoLayout = 'layoutMode' in target && target.layoutMode !== 'NONE';
+    var parentIsAutoLayout = !!parent && 'layoutMode' in parent && parent.layoutMode !== 'NONE';
+    if (!selfIsAutoLayout && !parentIsAutoLayout) {
+      nodeWarnings.push(
+        'Node ' + target.id + ' ("' + target.name + '") is neither an auto-layout frame nor a direct child ' +
+        'of one. Figma documents min/max size limits as applicable only in those cases, so the value may be ignored.'
+      );
+    }
+
+    for (var k = 0; k < requestedFields.length; k++) {
+      var field = requestedFields[k];
+      var value = requested[field];
+
+      // A live variable bind wins over the literal — say so instead of letting
+      // the caller believe the number they set is in force.
+      var alias = readBoundAlias(target, field);
+      if (alias) {
+        nodeWarnings.push(
+          '"' + field + '" on node ' + target.id + ' is bound to variable ' + alias.id +
+          '; the bound value takes precedence over the literal just written. ' +
+          'Unbind it first with figma_unbind_variable (which also clears the residual literal).'
+        );
+      }
+
+      try {
+        target[field] = value === undefined ? null : value;
+      } catch (err) {
+        errors.push({
+          nodeId: target.id,
+          field: field,
+          code: 'SET_FAILED',
+          message: 'Setting ' + field + ' to ' + JSON.stringify(value) + ' on node ' + target.id + ' threw: ' + err.message
+        });
+        continue;
+      }
+
+      // Verify the readback — null must clear, a number must stick.
+      var readback = target[field];
+      applied[field] = readback === undefined ? null : readback;
+
+      var wantsNull = value === null;
+      var landedNull = readback === null || readback === undefined;
+
+      if (wantsNull && !landedNull) {
+        errors.push({
+          nodeId: target.id,
+          field: field,
+          code: 'LIMIT_NOT_CLEARED',
+          message: field + ' on node ' + target.id + ' was set to null but reads back as ' + readback +
+            '. The clamp is still in force.'
+        });
+      } else if (!wantsNull && (landedNull || Math.abs(readback - value) > SIZE_EPSILON)) {
+        errors.push({
+          nodeId: target.id,
+          field: field,
+          code: 'LIMIT_NOT_APPLIED',
+          message: field + ' on node ' + target.id + ' was set to ' + value + ' but reads back as ' +
+            (landedNull ? 'null' : readback) + '. The limit was NOT applied.'
+        });
+      }
+    }
+
+    for (var w = 0; w < nodeWarnings.length; w++) warnings.push(nodeWarnings[w]);
+
+    var entry = {
+      nodeId: target.id,
+      name: target.name,
+      type: target.type,
+      // Full readback of all four limits, not just the ones requested.
+      minWidth: 'minWidth' in target ? target.minWidth : null,
+      maxWidth: 'maxWidth' in target ? target.maxWidth : null,
+      minHeight: 'minHeight' in target ? target.minHeight : null,
+      maxHeight: 'maxHeight' in target ? target.maxHeight : null,
+      width: target.width,
+      height: target.height,
+      applied: applied
+    };
+    if (nodeWarnings.length > 0) entry.warnings = nodeWarnings;
+    nodes.push(entry);
+  }
+
+  var result = {
+    success: errors.length === 0,
+    nodes: nodes,
+    notFound: notFound,
+    verified: errors.length === 0
+  };
+  if (warnings.length > 0) result.warnings = warnings;
+  if (errors.length > 0) result.errors = errors;
+  return result;
 }
 
 /**
@@ -4159,7 +4785,7 @@ function serializeGridStyle(style) {
  * Create a new page
  */
 async function createPage({ name, index }) {
-  requireFigmaDesign();
+  requireFigmaDesign('figma_create_page');
   const page = figma.createPage();
   page.name = name;
 
@@ -4491,7 +5117,7 @@ async function swapInstance({ instanceId, newComponentId }) {
  * Duplicate a page - clone entire page with all contents
  */
 async function duplicatePage({ pageId, name }) {
-  requireFigmaDesign();
+  requireFigmaDesign('figma_duplicate_page');
   var page = await figma.getNodeByIdAsync(pageId);
 
   if (!page) {
@@ -4542,12 +5168,32 @@ async function duplicatePage({ pageId, name }) {
 }
 
 /**
- * Set rotation on nodes
+ * Set rotation on nodes.
+ *
+ * `node.rotation = deg` is documented to rotate about the node's TOP-LEFT corner,
+ * which moves the node's visual center. pivot: 'center' (the default) instead
+ * writes relativeTransform so the visual center stays put.
+ *
+ * Figma's matrix is row-major [[m00,m01,m02],[m10,m11,m12]] and maps local→parent:
+ *   x_p = m00*x + m01*y + m02
+ *   y_p = m10*x + m11*y + m12
+ * rotation is documented as atan2(-m10, m00), so a rotation of θ has
+ * m00 = cos θ, m01 = sin θ, m10 = -sin θ, m11 = cos θ.
+ *
+ * The existing transform is read first, so the current center is correct even
+ * when the node is ALREADY rotated.
+ *
+ * Caveat handled below: the translation components of relativeTransform are
+ * ignored on auto-layout children, so center pivot is impossible there — those
+ * nodes get a plain rotation plus a warning rather than a silent wrong result.
  */
-async function setRotation({ nodeIds, rotation }) {
+async function setRotation({ nodeIds, rotation, pivot }) {
   var rotatedNodes = [];
   var notFound = [];
   var errors = [];
+  var warnings = [];
+
+  var requestedPivot = pivot === 'top-left' ? 'top-left' : 'center';
 
   for (var i = 0; i < nodeIds.length; i++) {
     var nodeId = nodeIds[i];
@@ -4563,21 +5209,93 @@ async function setRotation({ nodeIds, rotation }) {
       continue;
     }
 
-    node.rotation = rotation;
-    rotatedNodes.push({
+    var appliedPivot = 'top-left';
+    var warning = null;
+
+    if (requestedPivot === 'center') {
+      // Translation is computed by the parent for auto-layout children, so a
+      // compensating translation would be discarded. ABSOLUTE-positioned children
+      // are exempt — they keep their own translation.
+      var parent = node.parent;
+      var parentIsAutoLayout = !!parent && 'layoutMode' in parent && parent.layoutMode !== 'NONE';
+      var isAbsolute = 'layoutPositioning' in node && node.layoutPositioning === 'ABSOLUTE';
+
+      if (parentIsAutoLayout && !isAbsolute) {
+        warning = 'Node ' + node.id + ' ("' + node.name + '") could NOT be rotated about its center: its ' +
+          'parent "' + parent.name + '" (' + parent.id + ') is an auto-layout frame, which computes this ' +
+          'child\'s position itself and ignores the translation part of relativeTransform. Figma applied a ' +
+          'top-left pivot instead, so the node\'s visual center moved. To get a true center pivot, set ' +
+          'layoutPositioning: ABSOLUTE on the child, or wrap it in a plain (non-auto-layout) frame.';
+      } else if (!('relativeTransform' in node) || !node.relativeTransform) {
+        warning = 'Node ' + node.id + ' ("' + node.name + '") has no relativeTransform (' + node.type +
+          '), so the center pivot could not be applied. Figma rotated it about its top-left corner.';
+      } else {
+        var rad = (rotation * Math.PI) / 180;
+        var cos = Math.cos(rad);
+        var sin = Math.sin(rad);
+        var transform = node.relativeTransform;
+        var halfWidth = node.width / 2;
+        var halfHeight = node.height / 2;
+
+        // Current center, in the containing parent's coordinate space.
+        var centerX = transform[0][0] * halfWidth + transform[0][1] * halfHeight + transform[0][2];
+        var centerY = transform[1][0] * halfWidth + transform[1][1] * halfHeight + transform[1][2];
+
+        // Solve for the translation that maps the local center back onto that point.
+        node.relativeTransform = [
+          [cos, sin, centerX - cos * halfWidth - sin * halfHeight],
+          [-sin, cos, centerY + sin * halfWidth - cos * halfHeight]
+        ];
+        appliedPivot = 'center';
+      }
+    }
+
+    if (appliedPivot !== 'center') {
+      node.rotation = rotation;
+    }
+
+    // Verify the resulting angle. The centre-pivot matrix is derived from
+    // Figma's documented rotation === atan2(-m10, m00) rather than an official
+    // sample, so a sign error must surface rather than pass silently.
+    if (!warning && angleDelta(node.rotation, rotation) > 0.01) {
+      warning = 'Node ' + node.id + ' ("' + node.name + '") was asked for a rotation of ' + rotation +
+        '° but reads back as ' + node.rotation + '°. The rotation did not apply as requested — ' +
+        'treat the position as unverified.';
+    }
+
+    if (warning) warnings.push(warning);
+
+    var entry = {
       id: node.id,
       name: node.name,
       type: node.type,
-      rotation: node.rotation
-    });
+      requestedPivot: requestedPivot,
+      appliedPivot: appliedPivot,
+      // Read back so the caller can verify the rotation AND where the node ended up.
+      rotation: node.rotation,
+      absoluteBoundingBox: clone(node.absoluteBoundingBox) || null
+    };
+    if (warning) entry.warning = warning;
+    rotatedNodes.push(entry);
   }
 
-  return {
+  var result = {
     success: true,
     nodes: rotatedNodes,
     notFound: notFound,
     errors: errors
   };
+  if (warnings.length > 0) result.warnings = warnings;
+  return result;
+}
+
+/**
+ * Smallest absolute difference between two angles in degrees, accounting for the
+ * ±180 wrap (Figma reports rotation in -180..180, so 180 and -180 are equal).
+ */
+function angleDelta(a, b) {
+  var diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
 }
 
 /**
@@ -4702,7 +5420,7 @@ async function attachToParent(node, parentId) {
 // ---- FigJam: Sticky ----------------------------------------
 
 async function createSticky(params) {
-  requireFigJam();
+  requireFigJam('figma_create_sticky');
   var x = params.x !== undefined ? params.x : 0;
   var y = params.y !== undefined ? params.y : 0;
   var text = params.text;
@@ -4731,7 +5449,7 @@ async function createSticky(params) {
 }
 
 async function setSticky(params) {
-  requireFigJam();
+  requireFigJam('figma_set_sticky');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) throw new Error('Node not found: ' + params.nodeId);
   if (node.type !== 'STICKY') {
@@ -4746,7 +5464,7 @@ async function setSticky(params) {
 // ---- FigJam: Shape with Text -------------------------------
 
 async function createShapeWithText(params) {
-  requireFigJam();
+  requireFigJam('figma_create_shape_with_text');
   var x = params.x !== undefined ? params.x : 0;
   var y = params.y !== undefined ? params.y : 0;
   var width = params.width !== undefined ? params.width : 208;
@@ -4786,7 +5504,7 @@ async function createShapeWithText(params) {
 }
 
 async function setShapeType(params) {
-  requireFigJam();
+  requireFigJam('figma_set_shape_type');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) throw new Error('Node not found: ' + params.nodeId);
   if (node.type !== 'SHAPE_WITH_TEXT') {
@@ -4801,7 +5519,7 @@ async function setShapeType(params) {
 // ---- FigJam: Connector -------------------------------------
 
 async function createConnector(params) {
-  requireFigJam();
+  requireFigJam('figma_create_connector');
   var lineType = params.lineType || 'ELBOWED';
   var startCap = params.startCap || 'NONE';
   var endCap = params.endCap || 'ARROW_EQUILATERAL';
@@ -4838,7 +5556,7 @@ async function createConnector(params) {
 }
 
 async function setConnector(params) {
-  requireFigJam();
+  requireFigJam('figma_set_connector');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) throw new Error('Node not found: ' + params.nodeId);
   if (node.type !== 'CONNECTOR') {
@@ -4954,7 +5672,7 @@ async function setSection(params) {
 // ---- FigJam: Table -----------------------------------------
 
 async function createTable(params) {
-  requireFigJam();
+  requireFigJam('figma_create_table');
   var x = params.x !== undefined ? params.x : 0;
   var y = params.y !== undefined ? params.y : 0;
   var numRows = params.numRows !== undefined ? params.numRows : 2;
@@ -4996,7 +5714,7 @@ async function createTable(params) {
 }
 
 async function setTableCell(params) {
-  requireFigJam();
+  requireFigJam('figma_set_table_cell');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) throw new Error('Node not found: ' + params.nodeId);
   if (node.type !== 'TABLE') {
@@ -5033,7 +5751,7 @@ async function getTableNode(nodeId) {
 }
 
 async function insertTableRow(params) {
-  requireFigJam();
+  requireFigJam('figma_insert_table_row');
   var table = await getTableNode(params.nodeId);
   table.insertRow(params.rowIndex);
   return {
@@ -5045,7 +5763,7 @@ async function insertTableRow(params) {
 }
 
 async function insertTableColumn(params) {
-  requireFigJam();
+  requireFigJam('figma_insert_table_column');
   var table = await getTableNode(params.nodeId);
   table.insertColumn(params.columnIndex);
   return {
@@ -5057,7 +5775,7 @@ async function insertTableColumn(params) {
 }
 
 async function removeTableRow(params) {
-  requireFigJam();
+  requireFigJam('figma_remove_table_row');
   var table = await getTableNode(params.nodeId);
   table.removeRow(params.rowIndex);
   return {
@@ -5069,7 +5787,7 @@ async function removeTableRow(params) {
 }
 
 async function removeTableColumn(params) {
-  requireFigJam();
+  requireFigJam('figma_remove_table_column');
   var table = await getTableNode(params.nodeId);
   table.removeColumn(params.columnIndex);
   return {
@@ -5081,7 +5799,7 @@ async function removeTableColumn(params) {
 }
 
 async function resizeTableRow(params) {
-  requireFigJam();
+  requireFigJam('figma_resize_table_row');
   var table = await getTableNode(params.nodeId);
   table.resizeRow(params.rowIndex, params.height);
   return {
@@ -5093,7 +5811,7 @@ async function resizeTableRow(params) {
 }
 
 async function resizeTableColumn(params) {
-  requireFigJam();
+  requireFigJam('figma_resize_table_column');
   var table = await getTableNode(params.nodeId);
   table.resizeColumn(params.columnIndex, params.width);
   return {
@@ -5105,7 +5823,7 @@ async function resizeTableColumn(params) {
 }
 
 async function moveTableRow(params) {
-  requireFigJam();
+  requireFigJam('figma_move_table_row');
   var table = await getTableNode(params.nodeId);
   table.moveRow(params.fromIndex, params.toIndex);
   return {
@@ -5117,7 +5835,7 @@ async function moveTableRow(params) {
 }
 
 async function moveTableColumn(params) {
-  requireFigJam();
+  requireFigJam('figma_move_table_column');
   var table = await getTableNode(params.nodeId);
   table.moveColumn(params.fromIndex, params.toIndex);
   return {
@@ -5131,7 +5849,7 @@ async function moveTableColumn(params) {
 // ---- FigJam: Code Block ------------------------------------
 
 async function createCodeBlock(params) {
-  requireFigJam();
+  requireFigJam('figma_create_code_block');
   var x = params.x !== undefined ? params.x : 0;
   var y = params.y !== undefined ? params.y : 0;
   var code = params.code !== undefined ? params.code : '';
@@ -5153,7 +5871,7 @@ async function createCodeBlock(params) {
 }
 
 async function setCodeBlock(params) {
-  requireFigJam();
+  requireFigJam('figma_set_code_block');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) throw new Error('Node not found: ' + params.nodeId);
   if (node.type !== 'CODE_BLOCK') {
@@ -5173,7 +5891,7 @@ async function setCodeBlock(params) {
 // ---- FigJam: Link Preview (Embed / Link Unfurl) ------------
 
 async function createLinkPreview(params) {
-  requireFigJam();
+  requireFigJam('figma_create_link_preview');
   if (!params.url) {
     var err = new Error('url is required');
     err.code = 'INVALID_PARAMS';
@@ -5204,7 +5922,7 @@ async function createLinkPreview(params) {
 // ============================================================
 
 async function getReactions(params) {
-  requireFigmaDesign();
+  requireFigmaDesign('figma_get_reactions');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -5220,7 +5938,7 @@ async function getReactions(params) {
 }
 
 async function addReaction(params) {
-  requireFigmaDesign();
+  requireFigmaDesign('figma_add_reaction');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -5246,7 +5964,7 @@ async function addReaction(params) {
 }
 
 async function removeReaction(params) {
-  requireFigmaDesign();
+  requireFigmaDesign('figma_remove_reaction');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
@@ -5273,7 +5991,7 @@ async function removeReaction(params) {
 }
 
 async function setFlowStartingPoint(params) {
-  requireFigmaDesign();
+  requireFigmaDesign('figma_set_flow_starting_point');
   var node = await figma.getNodeByIdAsync(params.nodeId);
   if (!node) {
     var err = new Error('Node not found: ' + params.nodeId);
