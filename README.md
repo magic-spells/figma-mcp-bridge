@@ -5,7 +5,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 ## Features
 
 - **93 operations** - 68 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
-- **Works in both editors** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools)
+- **Works in both editors, plus read-only Dev Mode** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools). In Dev Mode the plugin runs read-only — see [Dev Mode support](#dev-mode-support)
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
 - **Full Figma API access** - Styles, variables, auto-layout, boolean operations, plus FigJam diagrams and documentation
@@ -17,6 +17,22 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 Claude Code ←──stdio──→ MCP Server ←──WebSocket──→ Figma Plugin ←──→ Figma API
                         (Node.js)    localhost:3055    (runs in Figma)
 ```
+
+## Dev Mode Support
+
+The plugin also runs in Figma **Dev Mode** (e.g. on a Developer seat, or a view-only file opened in Dev Mode). It appears in the inspect panel's plugin area with a **read-only** badge next to the port field.
+
+Dev Mode plugins get a read-only document — this is a Figma platform restriction, not a bridge limitation — so only the read tools work there:
+
+- `figma_get_context`, `figma_list_pages`, `figma_get_nodes`, `figma_get_children`
+- `figma_search_nodes`, `figma_search_components`, `figma_search_styles`, `figma_search_variables`
+- `figma_get_local_styles`, `figma_get_local_variables`
+- `figma_export_node`
+- `figma_set_selection`, `figma_set_current_page` (selection/navigation, not document edits)
+
+Every mutation tool returns a `READ_ONLY_EDITOR` error naming the tool. To edit the file, open it in the Figma Design editor with an editor seat.
+
+If you only need read access to designs and tokens, also consider [Figma's official MCP server](https://help.figma.com/hc/en-us/articles/32132100833559), which specializes in design-to-code extraction. This bridge's Dev Mode support exists so bridge users keep one consistent tool surface — its real differentiator (writing to the document) requires the Design editor.
 
 ## Quick Start
 
