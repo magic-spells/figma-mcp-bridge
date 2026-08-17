@@ -5,7 +5,7 @@
 
 export const nodesTool = {
   name: 'figma_get_nodes',
-  description: 'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes, and more.',
+  description: 'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes, auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables, explicitVariableModes, and more.',
   inputSchema: {
     type: 'object',
     properties: {

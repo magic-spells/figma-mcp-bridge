@@ -23,7 +23,7 @@ src/
 ├── server.js          # MCP server setup (McpServer configuration)
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (88 tools — 63 Figma + 21 FigJam + 4 Prototype)
+    ├── index.js       # Tool registration with Zod schemas (93 tools — 68 Figma + 21 FigJam + 4 Prototype)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
@@ -86,11 +86,11 @@ case 'new_command':
 
 ### Adding a FigJam-only command
 
-For commands that only make sense in FigJam (sticky notes, shapes-with-text, connectors, tables, code blocks, link previews), use the `requireFigJam()` guard at the top of the plugin handler:
+For commands that only make sense in FigJam (sticky notes, shapes-with-text, connectors, tables, code blocks, link previews), use the `requireFigJam()` guard at the top of the plugin handler. **Always pass the MCP tool name** — the error message names the tool, states it is FigJam only, and reports the current editor:
 
 ```javascript
 async function createSticky(params) {
-  requireFigJam();  // throws WRONG_EDITOR if running in a Figma design file
+  requireFigJam('figma_create_sticky');  // throws WRONG_EDITOR outside FigJam
   var sticky = figma.createSticky();
   // ...
   await attachToParent(sticky, params.parentId);  // shared helper for parent attachment
@@ -120,13 +120,15 @@ Mirror of the FigJam pattern, for commands that only make sense in Figma Design 
 
 ```javascript
 async function getReactions(params) {
-  requireFigmaDesign();  // throws FIGMA_DESIGN_ONLY if running in FigJam
+  requireFigmaDesign('figma_get_reactions');  // throws FIGMA_DESIGN_ONLY outside Figma Design
   var node = await figma.getNodeByIdAsync(params.nodeId);
   // ...
 }
 ```
 
 The helper is at `plugin/code.js` next to `requireFigJam()`.
+
+Both guards use an **explicit equality check**, never `!== 'figjam'`. `figma.editorType` has **five** values — `'figma' | 'figjam' | 'dev' | 'slides' | 'buzz'` — so a negated check would wrongly admit Dev Mode, Slides and Buzz. `describeCurrentEditor()` maps all five to a readable label for the error message.
 
 ## FigJam Tools Overview
 
@@ -239,6 +241,20 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - `NODE_NOT_FOUND` - Invalid node ID
 - `INVALID_PARAMS` - Missing/invalid parameters
 - `OPERATION_FAILED` - Figma API error
+- `WRONG_EDITOR` - FigJam-only tool called outside FigJam (message names the tool + current editorType)
+- `FIGMA_DESIGN_ONLY` - Figma-Design-only tool called outside a design file
+- `READ_ONLY_EDITOR` - Mutation tool called in Dev Mode (`editorType: 'dev'`), where the document is read-only
+- `INSTANCE_SUBLAYER_RESTRICTED` - Resize / size-bind attempted on a node inside an INSTANCE
+- `BIND_NOT_APPLIED` - `setBoundVariable` reported no error but the bind does not read back
+- `UNBIND_FAILED` - Unbind threw, or the field still reads back bound
+- `STYLE_NOT_APPLIED` - Async style setter reported no error but the style id does not read back
+- `STYLE_SETTER_UNAVAILABLE` - Node exposes the `*StyleId` property but not its required async setter
+- `RESIZE_NO_OP` - `resize()` changed nothing and the size still differs from the request
+- `LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED` - A min/max size limit did not stick / did not clear
+- `FIELD_NOT_SUPPORTED` - Node type does not have the requested field
+- `REORDER_FAILED` - The node's index did not read back as the requested final index
+- `EXPORT_WRITE_FAILED` - The export succeeded but the image could not be written to disk (path reported)
+- `EXPORT_NO_DATA` - Figma returned no image bytes, so nothing was written
 
 ### Standard Response Format
 
@@ -282,7 +298,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 8. **WebSocket runs in UI iframe** - Plugin UI thread handles WebSocket, main thread handles Figma API
 
-9. **Export returns base64** - `figma_export_node` returns base64-encoded image data
+9. **Export is file-first** - `figma_export_node` decodes the plugin's base64 **server side** (`src/tools/mutations.js`) and writes the image to disk, returning `{ path, format, bytes }` with no inline data. Default destination is `os.tmpdir()/figma-mcp-bridge/<node-id>-<timestamp>.<ext>`; `outputPath` (absolute) overrides it, directories are created, and an unwritable path returns `EXPORT_WRITE_FAILED`. `returnBase64: true` is the escape hatch. The plugin side still returns base64 over the socket — don't add file IO to `plugin/code.js`, it has no `fs`
 
 10. **Variable paint binding** - Use `figma.variables.setBoundVariableForPaint()` for fills/strokes
 
@@ -290,7 +306,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 12. **`detachInstance()` cascades** - Also detaches ancestor instances, use with caution
 
-13. **Reordering nodes** - Use `parent.appendChild(node)` for front, `parent.insertChild(0, node)` for back (children array is read-only)
+13. **Reordering nodes** - `children` is read-only, so order is changed with `appendChild` / `insertChild`. **Never use `insertChild` to move a node that is already a child of the same parent** — Figma does not document whether the index is interpreted before or after the implicit removal, which is what made `figma_reorder_node` land one slot off. `reorderNode` computes the desired final sibling order and re-`appendChild`s the changed suffix (documented as "adds to the end", so no ambiguity), then verifies the index by readback
 
 14. **`mainComponent` is async** - Use `getMainComponentAsync()` for instances (currently skipped in serialization)
 
@@ -316,7 +332,9 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 24. **Stamps/Highlights/WashiTape/Widgets cannot be created from plugins** - Only cloned from existing user-placed instances. They serialize their `stuckTo` node ID for inspection.
 
-25. **`editorType` is exposed in `figma_get_context`** - Returns `"figma"` or `"figjam"`. The `requireFigJam()` plugin helper guards FigJam-only commands; `WRONG_EDITOR` is the standard error code.
+25. **`editorType` is exposed in `figma_get_context`** - The union has **five** members: `"figma" | "figjam" | "dev" | "slides" | "buzz"`. The `requireFigJam(toolName)` plugin helper guards FigJam-only commands (`WRONG_EDITOR`); `requireFigmaDesign(toolName)` guards the reverse (`FIGMA_DESIGN_ONLY`). Both take an explicit tool name so the error identifies the tool, says it is FigJam-only / Design-only, and reports the current editor via `describeCurrentEditor()`. Never gate on `!== 'figjam'`.
+
+25b. **Dev Mode is supported read-only** - The manifest includes `"dev"` in `editorType` (plus `capabilities: ["inspect"]` so the UI iframe — which hosts the WebSocket, see constraint 8 — renders in the inspect panel). Dev Mode plugins get a read-only document, so `requireWritableEditor(command)` runs at the top of `handleCommand` and throws `READ_ONLY_EDITOR` for anything not in the `DEV_MODE_READ_COMMANDS` whitelist (get/search/export tools plus selection/current-page/viewport, which are not document edits). `get_reactions` is whitelisted so its own `requireFigmaDesign()` guard produces the accurate error. When adding a new read-only command, add it to the whitelist — new commands are treated as writes by default. The UI shows a "read-only" badge in Dev Mode (via the `get_editor_info` → `editor_info` message pair) and the window is widened to 260px to fit it.
 
 26. **`StickyNode.authorName` / `authorVisible` are read-only at runtime** - Figma's docs list them as R/W, but the FigJam plugin runtime throws "no setter for property" on assignment. Figma auto-populates both from the active user's identity. The schemas for `figma_create_sticky` / `figma_set_sticky` deliberately do NOT expose these. Don't add them back unless you've verified the runtime accepts writes.
 
@@ -342,6 +360,44 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - **URL action requires a click-like trigger** — `ON_HOVER` + `URL` is rejected. Use `ON_CLICK` or one of the mouse triggers.
 - **`overlayRelativePosition` requires `overlayPosition: MANUAL` on the destination frame** — without that, `setReactionsAsync` rejects the OVERLAY action. Plain OVERLAY navigation (no relative position) works fine.
 - **`SCROLL_TO` navigation requires the destination be a scrollable child of the source's container** — pointing it at a separate top-level frame is rejected. Same for `SCROLL_ANIMATE` transitions in unrelated contexts.
+
+## Variable / Style Constraints
+
+36. **`setExplicitVariableModeForCollection` must be passed a collection OBJECT** - The `(collectionId, modeId)` string overload is deprecated and **throws** under `documentAccess: dynamic-page`. Fetch with `await figma.variables.getVariableCollectionByIdAsync(id)` first. Same for `clearExplicitVariableModeForCollection(collection)` — it is a real, separate method, not `setExplicit...(collection, null)`. Both setters are **synchronous**. Available on every scene node **and** on `PageNode`. See `setVariableMode` in `plugin/code.js`.
+
+37. **`figma.variables.setBoundVariableForPaint` returns a COPY** - It does not mutate. You must assign the returned paint back (`style.paints = paints` / `node.fills = paints`) or the bind silently no-ops. Same trap for `setBoundVariableForEffect` and `setBoundVariableForLayoutGrid`.
+
+38. **Style variable binds go through `figma.getStyleByIdAsync`** - `figma_set_variable` accepts a `styleId` (and routes a style ID passed as `nodeId` down the same path). `TextStyle.setBoundVariable(field, variable)` takes a **Variable object only** — the string-ID form does not exist on styles at all. Bindable text fields: `fontFamily`, `fontSize`, `fontStyle`, `fontWeight`, `letterSpacing`, `lineHeight`, `paragraphSpacing`, `paragraphIndent`. `PaintStyle` binds only its color, and reads back under the key `paints` (an array), not `color`.
+
+39. **`strokeWeight` reads as `figma.mixed` when per-side weights differ** - `figma.mixed` is a Symbol, and `safeClone` turns Symbols into `null` — which would read as "no stroke weight". `readStrokeWeight(node)` returns the string `'MIXED'` instead, and the serializer then emits the four per-side weights alongside it. Per-side weights (`IndividualStrokesMixin`) exist on `RECTANGLE` plus the frame-likes (`FRAME`, `COMPONENT`, `COMPONENT_SET`, `INSTANCE`, `SLOT`, `SLIDE`) only.
+
+40. **`style.remove()` only deletes local styles** - It is sync and unrestricted, but the *fetch* must be `figma.getStyleByIdAsync`. `figma_delete_style` returns a `REMOTE_STYLE` error for library styles. Note `style.consumers` throws under dynamic-page — use `getStyleConsumersAsync()` if a consumer check is ever added.
+
+41. **All five `*StyleId` properties are READ-ONLY under dynamic-page** - `node.textStyleId = id` throws `Cannot call with documentAccess: dynamic-page. Use node.setTextStyleIdAsync instead.` `applyStyle` in `plugin/code.js` dispatches through `setFillStyleIdAsync` / `setStrokeStyleIdAsync` / `setTextStyleIdAsync` / `setEffectStyleIdAsync` / `setGridStyleIdAsync` and passes `style.id` (the canonical form — user-supplied ids drop the trailing comma, hence `normalizeStyleId()` for the comparison). Never add a plain `node.someStyleId = ...` assignment. The result is verified by readback and fails with `STYLE_NOT_APPLIED` rather than reporting success. `textStyleId` / `fillStyleId` can read back as `figma.mixed`, so any non-string readback counts as "not applied".
+
+## Anti-silent-failure Constraints
+
+Figma has several writes that report success and change nothing. The rule for this bridge: **no handler returns `success: true` without reading the value back.** Codes below are stable and referenced in tool descriptions.
+
+42. **Instance sublayers reject size overrides silently** - `resize()` and `setBoundVariable('width'|'height', v)` on a node inside an INSTANCE do nothing and report success. `assertNotInstanceSublayer(node, operation, remedy)` throws `INSTANCE_SUBLAYER_RESTRICTED` up front in `resizeNodes` and in the `setVariable` node-bind path. Detection is `findInstanceAncestor(node)` — a `node.parent` walk for `type === 'INSTANCE'`, stopping at PAGE/DOCUMENT. **The `I<instanceId>;<childId>` node-id convention is community lore, documented nowhere in Figma's typings, and is deliberately NOT used.** The suggested remedy in every message is: bind/resize on the component master, or use `figma_set_layout_align: STRETCH` (which works inside instances *and* preserves binds).
+
+43. **Every node variable bind is verified** - After `node.setBoundVariable(field, variable)` the plugin re-reads `node.boundVariables[field]` via `readBoundAlias()` and throws `BIND_NOT_APPLIED` if it is absent or points at a different variable. `readBoundAlias` handles the two readback quirks: node-level text fields come back as `VariableAlias[]`, and a `cornerRadius` bind surfaces on rects/frames as the four per-corner keys. The paint path (`fills`/`strokes`) is verified too, since `setBoundVariableForPaint` returns a copy. Successful binds echo `boundVariables` and `verified: true`.
+
+44. **Resize and layout changes can destroy width/height binds** - Undocumented in *both* directions, so the contract is empirical: capture → write → re-read → re-apply → verify. `captureSizeBinds(node)` snapshots the six size fields (`width`, `height`, `minWidth`, `maxWidth`, `minHeight`, `maxHeight`); `restoreSizeBinds(node, captured)` re-applies anything that went missing and verifies. Recovered binds land in `rebound`; unrecoverable ones become `warnings` via `describeLostBinds()`. Wired into both `resizeNodes` and `setAutoLayout` (where `layoutMode` / `primaryAxisSizingMode` are the risky writes).
+
+45. **`figma_resize_nodes` verifies the resulting size** - `SIZE_EPSILON = 0.01`. Unchanged size + differs from request → `RESIZE_NO_OP` in `errors` and `success: false` (the MCP handler flips that to `isError`). Changed but not to the requested value → a clamp `warning`. Each node echoes `requested` and `actual`.
+
+46. **min/max size limits: `null` clears, and unbinding leaves a literal behind** - `figma_set_size_limits` sets or clears all four, verifying each readback (`LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED`). It warns when the node is neither an auto-layout frame nor a direct child of one, and when the field is variable-bound (the bind beats the literal). `figma_unbind_variable` on a min/max field additionally sets the residual literal to `null` — without that, unbinding `maxWidth` freezes the last resolved number as a permanent clamp — and reports `previousLiteral` / `clearedLiteral`.
+
+47. **`node.rotation` pivots on the TOP-LEFT, not the center** - Documented Figma behavior. `figma_set_rotation` defaults to `pivot: 'center'` and writes `relativeTransform` instead: read the current transform, compute the visual center in parent space, then solve for the translation that keeps it. Matrix is row-major `[[m00,m01,m02],[m10,m11,m12]]` with `rotation === atan2(-m10, m00)`, so a rotation of θ is `[[cos, sin, tx], [-sin, cos, ty]]`. **Auto-layout children are excluded** — the parent computes their translation and discards the compensating one — so those get a plain rotation plus a `warning` naming the parent, never a silent wrong result. The resulting `rotation` is compared to the request (`angleDelta`, ±180-wrap aware) and every node echoes `appliedPivot` and `absoluteBoundingBox`.
+
+## Ergonomics Constraints
+
+48. **`figma_reorder_node`'s `position` is the FINAL index** - Not an insertion index. 0 is the bottom of the layer stack (Figma sorts `children` back-to-front), `childCount - 1` is the top; `'back'` is 0 and `'front'` is the last index. Out-of-range values are clamped, reported via `clamped: true` + `message`, and the achieved index is verified against the request (`REORDER_FAILED`). See constraint 13 for why `insertChild` is not used. Reordering inside an INSTANCE is documented-blocked, so `assertNotInstanceSublayer` runs first — a mid-sequence throw would otherwise leave the parent half-reordered. A `PAGE` parent gets `await parent.loadAsync()` first (dynamic-page requirement for `children`/`appendChild`).
+
+49. **Node ids resolve through `resolveNodeById`, not raw `getNodeByIdAsync`** - `getNodeByIdAsync` is unreliable for the composite instance-sublayer ids Figma hands back from search and selection (`I<instanceId>;<childId>`), which is why `figma_search_nodes` always worked where `figma_get_nodes` did not. The helper tries the direct lookup, and on a null result for an id containing `';'` walks each ancestor prefix (longest first, with and without the leading `I`) and searches that subtree for an exact `node.id` match. Used by `getNodes`, `getChildren` and `reorderNode`. A genuinely missing id is reported through `describeUnresolvedId()` — `notFound` keeps its shape (array of ids) and `notFoundDetails` carries the explanation. **This is id *resolution*, not an instance-sublayer *check*** — the permission check is still `findInstanceAncestor` (constraint 42), never the `;` heuristic.
+
+50. **Compact serialization carries x/y** - `serializeNodeCompact` (used by `figma_get_children` compact and `figma_search_nodes` compact) includes `x`/`y`; `serializeNode(node, 'compact')` already had x/y/width/height. Measuring child positions is how wrap and row grouping get verified, so compact output without them was useless for geometry. Compact deliberately does **not** carry the full-mode fields (`boundVariables`, `explicitVariableModes`, `layoutWrap`, …) — that is what `depth: 'full'` is for.
 
 ## Running the Server
 

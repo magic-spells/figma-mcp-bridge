@@ -4,11 +4,12 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 
 ## Features
 
-- **88 operations** - 63 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
-- **Works in both editors** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools)
+- **93 operations** - 68 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
+- **Works in both editors, plus read-only Dev Mode** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools). In Dev Mode the plugin runs read-only — see [Dev Mode support](#dev-mode-support)
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
 - **Full Figma API access** - Styles, variables, auto-layout, boolean operations, plus FigJam diagrams and documentation
+- **Built-in skills** - Ships its own operating guide as MCP resources (`skill://figma-bridge/SKILL.md`); connected agents are directed to read it before write-heavy work, so no separate skill install is needed
 
 ## Architecture
 
@@ -16,6 +17,22 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 Claude Code ←──stdio──→ MCP Server ←──WebSocket──→ Figma Plugin ←──→ Figma API
                         (Node.js)    localhost:3055    (runs in Figma)
 ```
+
+## Dev Mode Support
+
+The plugin also runs in Figma **Dev Mode** (e.g. on a Developer seat, or a view-only file opened in Dev Mode). It appears in the inspect panel's plugin area with a **read-only** badge next to the port field.
+
+Dev Mode plugins get a read-only document — this is a Figma platform restriction, not a bridge limitation — so only the read tools work there:
+
+- `figma_get_context`, `figma_list_pages`, `figma_get_nodes`, `figma_get_children`
+- `figma_search_nodes`, `figma_search_components`, `figma_search_styles`, `figma_search_variables`
+- `figma_get_local_styles`, `figma_get_local_variables`
+- `figma_export_node`
+- `figma_set_selection`, `figma_set_current_page` (selection/navigation, not document edits)
+
+Every mutation tool returns a `READ_ONLY_EDITOR` error naming the tool. To edit the file, open it in the Figma Design editor with an editor seat.
+
+If you only need read access to designs and tokens, also consider [Figma's official MCP server](https://help.figma.com/hc/en-us/articles/32132100833559), which specializes in design-to-code extraction. This bridge's Dev Mode support exists so bridge users keep one consistent tool surface — its real differentiator (writing to the document) requires the Design editor.
 
 ## Quick Start
 
@@ -139,7 +156,11 @@ Get detailed information about specific nodes by their IDs.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `nodeIds` | string[] | Yes | Array of node IDs (e.g., `["1:23", "4:56"]`) |
-| `depth` | string | No | Detail level: `minimal`, `compact`, or `full` (default) |
+| `depth` | string | No | Detail level: `minimal`, `compact` (adds x/y/width/height), or `full` (default) |
+
+`full` includes `boundVariables`, `explicitVariableModes`, `layoutWrap`, `counterAxisSpacing`, `clipsContent` and per-side stroke weights.
+
+Composite instance-sublayer IDs (`I<instanceId>;<childId>`) resolve reliably — if the direct lookup misses, the instance root is resolved and its subtree searched. IDs that genuinely don't exist are returned in `notFound`, with an explanation in `notFoundDetails`.
 
 #### `figma_get_local_styles`
 List all local styles defined in the document.
@@ -163,7 +184,9 @@ Get immediate children of a node. Efficient for browsing hierarchy one level at 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `parentId` | string | Yes | | Node ID to get children of |
-| `compact` | boolean | No | `true` | Return minimal data |
+| `compact` | boolean | No | `true` | Return minimal data: `id`, `name`, `type`, `x`, `y`, `parentId`, `childCount` |
+
+Compact results include `x`/`y`, so they can be used to measure layout (for example, which children share a row after wrapping) without dropping to the full serialization.
 
 #### `figma_search_nodes`
 Search for nodes by name within a scope. **Preferred for finding specific frames, sections, or elements.**
@@ -355,6 +378,22 @@ Set node transparency.
 | `nodeId` | string | Yes | Node to modify |
 | `opacity` | number | Yes | Opacity (0-1) |
 
+#### `figma_set_visible`
+Show or hide nodes. Use this rather than binding a BOOLEAN variable or setting opacity to 0 just to hide something.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeIds` | string[] | Yes | Nodes to show or hide |
+| `visible` | boolean | Yes | `true` to show, `false` to hide |
+
+#### `figma_set_clips_content`
+Set whether frame-like nodes clip their children to the frame bounds. Works on `FRAME`, `COMPONENT`, `COMPONENT_SET`, `INSTANCE`, `SLOT`, `SLIDE`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeIds` | string[] | Yes | Nodes to modify |
+| `clipsContent` | boolean | Yes | `true` to clip, `false` to let children overflow |
+
 #### `figma_set_corner_radius`
 Set corner radius.
 
@@ -457,6 +496,13 @@ Create a local text style.
 | `textDecoration` | string | No | | Text decoration |
 | `description` | string | No | | Style description |
 
+#### `figma_delete_style`
+Delete a local style (paint, text, effect or grid). Library styles return `REMOTE_STYLE`. Nodes using the style keep their resolved values but lose the link. Find IDs with `figma_search_styles`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `styleId` | string | Yes | Style ID to delete (e.g. `"S:abc123..."`) |
+
 ---
 
 ### Layout Commands
@@ -505,13 +551,24 @@ Move nodes to a new position.
 | `relative` | boolean | No | If true, x/y are offsets (default false) |
 
 #### `figma_resize_nodes`
-Resize nodes.
+Resize nodes. The resulting size is verified (`RESIZE_NO_OP` when nothing changed), and width/height variable bindings are captured before the write and re-applied afterwards — recovered binds appear in `rebound`, unrecoverable ones in `warnings`. Resizing a node inside an `INSTANCE` returns `INSTANCE_SUBLAYER_RESTRICTED` rather than a false success; use `figma_set_layout_align: STRETCH`, which works inside instances and preserves binds.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `nodeIds` | string[] | Yes | Nodes to resize |
 | `width` | number | No | New width |
 | `height` | number | No | New height |
+
+#### `figma_set_size_limits`
+Set or **clear** min/max size limits. Pass a positive number to set, explicit `null` to remove — so `maxWidth` is no longer a one-way door. Limits apply to auto-layout frames and their direct children; anything else gets a warning. Every write is verified (`LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `nodeIds` | string[] | Yes | Nodes to update |
+| `minWidth` | number/null | No | Minimum width; `null` clears, omit to leave unchanged |
+| `maxWidth` | number/null | No | Maximum width; `null` clears, omit to leave unchanged |
+| `minHeight` | number/null | No | Minimum height; `null` clears, omit to leave unchanged |
+| `maxHeight` | number/null | No | Maximum height; `null` clears, omit to leave unchanged |
 
 #### `figma_delete_nodes`
 Delete nodes.
@@ -545,12 +602,16 @@ Rename nodes.
 | `name` | string | Yes | New name |
 
 #### `figma_reorder_node`
-Change z-order (layer order).
+Change z-order (layer order) among siblings.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `nodeId` | string | Yes | Node to reorder |
-| `position` | string/number | Yes | `"front"`, `"back"`, or index number |
+| `position` | string/number | Yes | `"front"`, `"back"`, or the **final** zero-based index |
+
+A numeric `position` is the final index the node ends up at — ask for 2 and it is at 2 when the call returns. Figma sorts `children` back-to-front, so **0 is the bottom** of the layer stack and `childCount - 1` is the top; `"back"` is 0 and `"front"` is the last index. Out-of-range indices are clamped and the response reports `clamped: true` with a message. The final index is read back and verified — a mismatch fails with `REORDER_FAILED` instead of reporting success.
+
+Reordering children of an `INSTANCE` is blocked by Figma and returns `INSTANCE_SUBLAYER_RESTRICTED`; reorder on the component master instead.
 
 #### `figma_set_constraints`
 Set resize constraints (non-auto-layout frames only).
@@ -584,15 +645,19 @@ Switch to a different page.
 ### Export Commands
 
 #### `figma_export_node`
-Export a node as an image.
+Export a node as an image. **The image is written to disk and the file path is returned** — read that file to view the render.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `nodeId` | string | Yes | | Node to export |
 | `format` | string | No | `"PNG"` | Format: `PNG`, `SVG`, `JPG`, `PDF` |
 | `scale` | number | No | `1` | Export scale (1 = 100%) |
+| `outputPath` | string | No | | Absolute file path to write to. Parent directories are created. |
+| `returnBase64` | boolean | No | `false` | Return base64 data inline instead of writing a file |
 
-Returns base64-encoded data.
+**Returns:** `{ success, nodeId, path, format, scale, bytes }` — no inline image data.
+
+Omit `outputPath` and the file lands at `<tmpdir>/figma-mcp-bridge/<node-id>-<timestamp>.<ext>`. This is file-first by design: inline base64 can't be viewed, which used to force callers to inflate `scale` until the response was large enough to spill to a readable file. An unwritable path fails with `EXPORT_WRITE_FAILED` rather than silently losing the export.
 
 ---
 
@@ -700,13 +765,23 @@ Delete a mode from a variable collection.
 | `collectionId` | string | Yes | Collection ID containing the mode |
 | `modeId` | string | Yes | Mode ID to delete |
 
+#### `figma_set_variable_mode`
+Pin an explicit variable mode on nodes **or pages**, or clear an existing pin. This is how a preview/page frame is made to resolve a particular mode (e.g. a mobile frame pinned to the Spacing collection's `mobile` mode) — no more cloning a frame just to inherit its mode. Pins are per-collection and travel through clones and instances, so `clear: true` is the fix for a bad inherited pin. The response echoes each node's resulting `explicitVariableModes` (`{}` means nothing is pinned).
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `nodeIds` | string[] | Yes | | Node IDs or page IDs to pin/unpin |
+| `collectionId` | string | Yes | | Variable collection the pin applies to |
+| `modeId` | string | No | | Mode to pin. Required unless `clear` is true |
+| `clear` | boolean | No | `false` | Remove this collection's pin instead of setting one |
+
 #### `figma_unbind_variable`
-Remove a variable binding from a node property.
+Remove a variable binding from a node property. On a min/max size field it also clears the residual literal (reported as `previousLiteral` / `clearedLiteral`) — without that, unbinding `maxWidth` freezes the last resolved number as a permanent clamp.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `nodeId` | string | Yes | | Node ID to unbind from |
-| `field` | string | Yes | | Field to unbind (`fills`, `strokes`, `opacity`, etc.) |
+| `field` | string | Yes | | Field to unbind (`fills`, `strokes`, `opacity`, `maxWidth`, etc.) |
 | `paintIndex` | number | No | `0` | Paint array index for fills/strokes |
 
 ---
@@ -1236,6 +1311,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - **Lines** have height=0, use `length` parameter
 - **Vectors** only support M, L, Q, C, Z commands (no arcs)
 - **`detachInstance()`** also detaches ancestor instances
+- **Instance sublayers** can't be resized, size-bound, or reordered — Figma blocks these, and the bridge returns `INSTANCE_SUBLAYER_RESTRICTED` rather than a false success. Act on the component master, or use `figma_set_layout_align: STRETCH`
 - **30-second timeout** on all commands
 
 ---

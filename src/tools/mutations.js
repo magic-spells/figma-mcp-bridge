@@ -2,6 +2,24 @@
  * Mutation tools - tools that modify the Figma document
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Buffer } from 'node:buffer';
+
+// File extension per export format, for the default output path
+const EXPORT_EXTENSIONS = { PNG: 'png', SVG: 'svg', JPG: 'jpg', PDF: 'pdf' };
+
+/**
+ * Build the default on-disk destination for an export.
+ * os.tmpdir()/figma-mcp-bridge/<sanitized-node-id>-<timestamp>.<ext>
+ */
+function defaultExportPath(nodeId, format) {
+  const ext = EXPORT_EXTENSIONS[format] || 'bin';
+  const safeId = String(nodeId).replace(/[^A-Za-z0-9._-]+/g, '-');
+  return path.join(os.tmpdir(), 'figma-mcp-bridge', `${safeId}-${Date.now()}.${ext}`);
+}
+
 /**
  * Set fills on a node
  */
@@ -63,7 +81,7 @@ export async function handleSetFills(bridge, args) {
 }
 
 /**
- * Set strokes on a node
+ * Set strokes (colors and/or uniform + per-side weights) on a node
  */
 export async function handleSetStrokes(bridge, args) {
   if (!bridge.isConnected()) {
@@ -81,7 +99,7 @@ export async function handleSetStrokes(bridge, args) {
     };
   }
 
-  const { nodeId, strokes, strokeWeight } = args;
+  const { nodeId } = args;
 
   if (!nodeId) {
     return {
@@ -99,7 +117,8 @@ export async function handleSetStrokes(bridge, args) {
   }
 
   try {
-    const result = await bridge.sendCommand('set_strokes', { nodeId, strokes, strokeWeight });
+    // Pass args through so strokes, strokeWeight and the four per-side weights all reach the plugin
+    const result = await bridge.sendCommand('set_strokes', args);
     return {
       content: [{
         type: 'text',
@@ -477,7 +496,11 @@ export async function handleResizeNodes(bridge, args) {
       content: [{
         type: 'text',
         text: JSON.stringify(result, null, 2)
-      }]
+      }],
+      // The plugin verifies width/height by readback. A resize that silently did
+      // nothing comes back as success: false with an errors array — surface that
+      // as an error instead of letting the caller record work that never happened.
+      isError: !!(result && result.success === false)
     };
   } catch (error) {
     return {
@@ -990,7 +1013,7 @@ export async function handleExportNode(bridge, args) {
     };
   }
 
-  const { nodeId, format, scale } = args;
+  const { nodeId, format, scale, outputPath, returnBase64 } = args;
 
   if (!nodeId) {
     return {
@@ -1007,12 +1030,88 @@ export async function handleExportNode(bridge, args) {
     };
   }
 
-  try {
-    const result = await bridge.sendCommand('export_node', { nodeId, format, scale });
+  if (outputPath !== undefined && outputPath !== null && !path.isAbsolute(outputPath)) {
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify(result, null, 2)
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: `outputPath must be an absolute file path. Got: ${outputPath}`
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('export_node', { nodeId, format, scale });
+
+    // Escape hatch: callers that genuinely want the bytes inline.
+    if (returnBase64) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+
+    if (!result || typeof result.data !== 'string' || result.data.length === 0) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: {
+              code: 'EXPORT_NO_DATA',
+              message: `Figma returned no image data for node ${nodeId}. Nothing was written to disk.`
+            }
+          }, null, 2)
+        }],
+        isError: true
+      };
+    }
+
+    // File-first: decode and write, return the path. Images cannot be viewed
+    // inline as base64, so a path the caller can Read is the useful result.
+    const resolvedFormat = String(format || result.format || 'PNG').toUpperCase();
+    const targetPath = outputPath || defaultExportPath(result.nodeId || nodeId, resolvedFormat);
+    const buffer = Buffer.from(result.data, 'base64');
+
+    try {
+      const dir = path.dirname(targetPath);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(targetPath, buffer);
+    } catch (writeError) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: {
+              code: 'EXPORT_WRITE_FAILED',
+              message: `Exported node ${nodeId} but could not write the image to ${targetPath}: ${writeError.message}. ` +
+                'Pass a writable absolute outputPath, or returnBase64: true to get the data inline instead.',
+              path: targetPath
+            }
+          }, null, 2)
+        }],
+        isError: true
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          nodeId: result.nodeId || nodeId,
+          path: targetPath,
+          format: resolvedFormat,
+          scale: result.scale !== undefined ? result.scale : scale,
+          bytes: buffer.length,
+          message: 'Image written to disk. Read the file at `path` to view it.'
+        }, null, 2)
       }]
     };
   } catch (error) {
@@ -1510,7 +1609,7 @@ export async function handleSearchVariables(bridge, args) {
 }
 
 /**
- * Set variable value or bind variable to node
+ * Set variable value, or bind variable to a node or style property
  */
 export async function handleSetVariable(bridge, args) {
   if (!bridge.isConnected()) {
@@ -1528,7 +1627,7 @@ export async function handleSetVariable(bridge, args) {
     };
   }
 
-  const { variableId, modeId, value, nodeId, field } = args;
+  const { variableId, modeId, value, nodeId, styleId, field } = args;
 
   if (!variableId) {
     return {
@@ -1561,14 +1660,14 @@ export async function handleSetVariable(bridge, args) {
     };
   }
 
-  if (nodeId && !field) {
+  if ((nodeId || styleId) && !field) {
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
           error: {
             code: 'INVALID_PARAMS',
-            message: 'field is required when binding to a node'
+            message: 'field is required when binding to a node or style'
           }
         }, null, 2)
       }],
@@ -3859,7 +3958,7 @@ export async function handleSetRotation(bridge, args) {
     };
   }
 
-  const { nodeIds, rotation } = args;
+  const { nodeIds, rotation, pivot } = args;
 
   if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
     return {
@@ -3874,6 +3973,10 @@ export async function handleSetRotation(bridge, args) {
       }],
       isError: true
     };
+  }
+
+  if (pivot !== undefined && pivot !== 'center' && pivot !== 'top-left') {
+    return invalidParams(`pivot must be "center" or "top-left", got "${pivot}"`);
   }
 
   if (rotation === undefined) {
@@ -4190,4 +4293,131 @@ export async function handleRemoveReaction(bridge, args) {
 
 export async function handleSetFlowStartingPoint(bridge, args) {
   return runCommand(bridge, 'set_flow_starting_point', args);
+}
+
+// ============================================================
+// Visibility, clipping, style deletion, variable modes
+// ============================================================
+
+/**
+ * Invalid-params response in the standard MCP shape
+ */
+function invalidParams(message) {
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: { code: 'INVALID_PARAMS', message }
+      }, null, 2)
+    }],
+    isError: true
+  };
+}
+
+/**
+ * Show or hide nodes
+ */
+export async function handleSetVisible(bridge, args) {
+  const { nodeIds } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node IDs');
+  }
+
+  return runCommand(bridge, 'set_visible', args);
+}
+
+/**
+ * Set clipsContent on frame-like nodes
+ */
+export async function handleSetClipsContent(bridge, args) {
+  const { nodeIds } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node IDs');
+  }
+
+  return runCommand(bridge, 'set_clips_content', args);
+}
+
+/**
+ * Set or clear min/max size limits on nodes.
+ *
+ * `null` is a meaningful value here (it clears the limit), so the presence check
+ * uses hasOwnProperty rather than a truthiness test.
+ */
+export async function handleSetSizeLimits(bridge, args) {
+  const { nodeIds } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node IDs');
+  }
+
+  const limitFields = ['minWidth', 'maxWidth', 'minHeight', 'maxHeight'];
+  const provided = limitFields.filter(
+    (field) => Object.prototype.hasOwnProperty.call(args, field) && args[field] !== undefined
+  );
+
+  if (provided.length === 0) {
+    return invalidParams(
+      'At least one of minWidth, maxWidth, minHeight, maxHeight must be provided. ' +
+      'Pass a number to set a limit, or null to clear it.'
+    );
+  }
+
+  for (const field of provided) {
+    const value = args[field];
+    if (value !== null && (typeof value !== 'number' || !(value > 0))) {
+      return invalidParams(`${field} must be a positive number, or null to clear it (got ${JSON.stringify(value)})`);
+    }
+  }
+
+  const result = await runCommand(bridge, 'set_size_limits', args);
+  if (result.isError) return result;
+
+  // The plugin verifies every write by readback; a limit that did not land comes
+  // back as success: false with an errors array.
+  try {
+    const parsed = JSON.parse(result.content[0].text);
+    if (parsed && parsed.success === false) {
+      return Object.assign({}, result, { isError: true });
+    }
+  } catch (_) {
+    // Non-JSON payload — leave the response as-is.
+  }
+  return result;
+}
+
+/**
+ * Delete a local style
+ */
+export async function handleDeleteStyle(bridge, args) {
+  const { styleId } = args;
+
+  if (!styleId) {
+    return invalidParams('styleId is required');
+  }
+
+  return runCommand(bridge, 'delete_style', args);
+}
+
+/**
+ * Pin or unpin an explicit variable mode on nodes/pages
+ */
+export async function handleSetVariableMode(bridge, args) {
+  const { nodeIds, collectionId, modeId, clear } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node or page IDs');
+  }
+
+  if (!collectionId) {
+    return invalidParams('collectionId is required');
+  }
+
+  if (!clear && !modeId) {
+    return invalidParams('modeId is required unless clear is true');
+  }
+
+  return runCommand(bridge, 'set_variable_mode', args);
 }
