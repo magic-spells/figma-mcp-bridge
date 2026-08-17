@@ -230,7 +230,7 @@ export function registerTools(server, bridge) {
   // figma_get_nodes - Get node details by ID
   server.tool(
     'figma_get_nodes',
-    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes, and more. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
+    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes, auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
     {
       nodeIds: z.array(z.string()).describe('Array of Figma node IDs (e.g., ["1:23", "4:56"])'),
       depth: z.enum(['minimal', 'compact', 'full']).optional().default('full').describe('Detail level: "minimal" (~5 props: id, name, type, childIds), "compact" (~10 props: + position/size), "full" (all ~40 props). Use minimal/compact for tree traversal to reduce tokens.')

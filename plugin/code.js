@@ -3453,6 +3453,19 @@ function serializeNode(node, depth) {
     base.paddingTop = node.paddingTop;
     base.paddingBottom = node.paddingBottom;
     base.itemSpacing = node.itemSpacing;
+    // Wrap settings — only meaningful when layoutMode !== 'NONE'
+    if ('layoutWrap' in node) {
+      base.layoutWrap = node.layoutWrap;
+    }
+    // Row gap for wrapped auto-layout; can be null (syncs with itemSpacing)
+    if ('counterAxisSpacing' in node) {
+      base.counterAxisSpacing = node.counterAxisSpacing;
+    }
+  }
+
+  // Frame-like nodes: whether children are clipped to the frame bounds
+  if ('clipsContent' in node) {
+    base.clipsContent = node.clipsContent;
   }
 
   if ('constraints' in node) {
@@ -3551,6 +3564,24 @@ function serializeNode(node, depth) {
     var stuck = node.stuckNodes;
     if (stuck.length > 0) {
       base.stuckNodeIds = stuck.map(function(n) { return n.id; });
+    }
+  }
+
+  // Node-level variable bindings — { [field]: VariableAlias | VariableAlias[] }
+  // Omitted when absent or empty so unbound nodes don't carry a dead key.
+  if ('boundVariables' in node && node.boundVariables) {
+    var boundVars = clone(node.boundVariables);
+    if (boundVars && Object.keys(boundVars).length > 0) {
+      base.boundVariables = boundVars;
+    }
+  }
+
+  // Variable modes pinned on this node — { [collectionId]: modeId }
+  // Pins travel through clone/instance and cannot be cleared, so surface them.
+  if ('explicitVariableModes' in node && node.explicitVariableModes) {
+    var explicitModes = clone(node.explicitVariableModes);
+    if (explicitModes && Object.keys(explicitModes).length > 0) {
+      base.explicitVariableModes = explicitModes;
     }
   }
 
