@@ -3,7 +3,7 @@
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { registerTools } from './tools/index.js';
@@ -39,6 +39,10 @@ Multiple Claude sessions can run concurrently and the bridge falls back through 
 > "The Figma MCP bridge is running on port **${port}**. Open the Figma plugin and set its port input to **${port}**, then re-run the plugin if it was already open."
 
 Don't make the user discover the port themselves — surface it the first time you notice they aren't connected.
+
+## SKILLS — READ BEFORE WRITE-HEAVY WORK
+
+This server ships its own skills as MCP resources. **Before any session that creates or edits design content (not just single reads), read \`skill://figma-bridge/SKILL.md\`** — it covers verification discipline (readback + export-and-look), the error codes that mean "Figma forbids this", bind-preserving sizing, mode pinning, concurrency rules, and auto-layout traps. List resources to discover any additional skills shipped with this server version.
 
 ## FigJam Support
 
@@ -106,5 +110,45 @@ figma_search_nodes({ parentId: "0:1", nameContains: "Button", types: ["FRAME", "
   // Register all Figma tools
   registerTools(server, bridge);
 
+  // Serve every skills/<name>/SKILL.md as an MCP resource (skill://<name>/SKILL.md)
+  // so agents get the bridge's operating knowledge without installing anything.
+  registerSkillResources(server);
+
   return server;
+}
+
+/**
+ * Register the markdown skills shipped in skills/ as MCP resources.
+ * Files are read lazily per request so a dev checkout picks up edits
+ * without a server restart. Missing dir (or a race on a deleted file)
+ * degrades to no/absent resources rather than a crash.
+ * @param {McpServer} server
+ */
+function registerSkillResources(server) {
+  const skillsDir = join(__dirname, '..', 'skills');
+  if (!existsSync(skillsDir)) return;
+
+  for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const skillPath = join(skillsDir, entry.name, 'SKILL.md');
+    if (!existsSync(skillPath)) continue;
+
+    const uri = `skill://${entry.name}/SKILL.md`;
+    server.registerResource(
+      entry.name,
+      uri,
+      {
+        title: `Skill: ${entry.name}`,
+        description: `Operating skill shipped with figma-mcp-bridge. Read before write-heavy ${entry.name} work.`,
+        mimeType: 'text/markdown'
+      },
+      async () => ({
+        contents: [{
+          uri,
+          mimeType: 'text/markdown',
+          text: readFileSync(skillPath, 'utf8')
+        }]
+      })
+    );
+  }
 }
