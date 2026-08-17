@@ -15,7 +15,7 @@ figma.ui.onmessage = async (msg) => {
     figma.ui.postMessage({
       type: 'handshake_info',
       payload: {
-        pluginVersion: '0.3.0',
+        pluginVersion: '0.4.0',
         protocolVersion: '1',
         fileId: figma.fileKey || 'unknown',
         fileName: figma.root.name,
@@ -308,22 +308,130 @@ function listPages() {
   return { pages };
 }
 
+/**
+ * Resolve a node id to a node, with a fallback for instance-sublayer ids.
+ *
+ * `figma.getNodeByIdAsync` resolves most ids, but it is unreliable for the
+ * composite ids Figma hands out for nodes inside instances (the community
+ * `I<instanceId>;<childId>` shape — undocumented, but it is what search results
+ * and selections actually return). When that lookup comes back null and the id
+ * contains a ';', resolve the instance root (the part before the last ';') and
+ * walk its subtree comparing `node.id`. This is exactly what search_nodes does
+ * implicitly via findAll, which is why search always worked where get_nodes did not.
+ *
+ * @param {string} nodeId
+ * @returns {Promise<BaseNode|null>}
+ */
+async function resolveNodeById(nodeId) {
+  if (typeof nodeId !== 'string' || nodeId === '') return null;
+
+  var node = await figma.getNodeByIdAsync(nodeId);
+  if (node) return node;
+
+  if (nodeId.indexOf(';') === -1) return null;
+  return await resolveSublayerId(nodeId);
+}
+
+/**
+ * Fallback resolution for a composite `I<root>;<child>[;<child>...]` id.
+ * Tries each ancestor prefix (longest first, with and without the leading `I`)
+ * and searches that node's subtree for an exact id match.
+ * @param {string} nodeId
+ * @returns {Promise<BaseNode|null>}
+ */
+async function resolveSublayerId(nodeId) {
+  var parts = nodeId.split(';');
+
+  for (var i = parts.length - 1; i >= 1; i--) {
+    var prefix = parts.slice(0, i).join(';');
+    var candidates = [prefix];
+    if (prefix.charAt(0) === 'I') candidates.push(prefix.slice(1));
+
+    for (var c = 0; c < candidates.length; c++) {
+      var root = null;
+      try {
+        root = await figma.getNodeByIdAsync(candidates[c]);
+      } catch (e) {
+        root = null;
+      }
+      if (!root) continue;
+      if (root.id === nodeId) return root;
+
+      var found = findDescendantById(root, nodeId);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Depth-first search of a subtree for an exact node id.
+ * @param {BaseNode} root
+ * @param {string} targetId
+ * @returns {BaseNode|null}
+ */
+function findDescendantById(root, targetId) {
+  if (!root || !('children' in root)) return null;
+
+  if (typeof root.findOne === 'function') {
+    try {
+      return root.findOne(function (n) { return n.id === targetId; });
+    } catch (e) {
+      // fall through to the manual walk
+    }
+  }
+
+  var stack = root.children.slice();
+  while (stack.length > 0) {
+    var current = stack.pop();
+    if (current.id === targetId) return current;
+    if ('children' in current) {
+      var kids = current.children;
+      for (var k = 0; k < kids.length; k++) stack.push(kids[k]);
+    }
+  }
+  return null;
+}
+
+/**
+ * Human-readable explanation for an id that could not be resolved.
+ * @param {string} nodeId
+ * @returns {string}
+ */
+function describeUnresolvedId(nodeId) {
+  if (typeof nodeId === 'string' && nodeId.indexOf(';') !== -1) {
+    var rootId = nodeId.split(';')[0];
+    return 'No node with id "' + nodeId + '" exists in this document. It has the shape of an ' +
+      'instance-sublayer id, so resolution also walked the subtree of "' + rootId + '" and found ' +
+      'no match. Sublayer ids change when the instance\'s master changes, so the id is most likely ' +
+      'stale — re-find the node with figma_search_nodes.';
+  }
+  return 'No node with id "' + nodeId + '" exists in this document.';
+}
+
 async function getNodes({ nodeIds = [], depth }) {
   var nodes = [];
   var notFound = [];
+  var notFoundDetails = [];
   var serializeDepth = depth || 'full';
 
   for (var i = 0; i < nodeIds.length; i++) {
     var nodeId = nodeIds[i];
-    var node = await figma.getNodeByIdAsync(nodeId);
+    var node = await resolveNodeById(nodeId);
     if (node) {
       nodes.push(serializeNode(node, serializeDepth));
     } else {
       notFound.push(nodeId);
+      notFoundDetails.push({ id: nodeId, message: describeUnresolvedId(nodeId) });
     }
   }
 
-  return { nodes, notFound };
+  var result = { nodes: nodes, notFound: notFound };
+  if (notFoundDetails.length > 0) {
+    result.notFoundDetails = notFoundDetails;
+  }
+  return result;
 }
 
 // ============================================================
@@ -1956,6 +2064,13 @@ function serializeNodeCompact(node) {
     type: node.type
   };
 
+  // x/y are included because measuring child positions is how wrap, row grouping
+  // and alignment get verified — without them compact output is unusable for geometry.
+  if ('x' in node) {
+    result.x = node.x;
+    result.y = node.y;
+  }
+
   if (node.parent) {
     result.parentId = node.parent.id;
   }
@@ -2270,9 +2385,9 @@ async function getChildren(params) {
     throw new Error('parentId is required for get_children');
   }
 
-  var parent = await figma.getNodeByIdAsync(parentId);
+  var parent = await resolveNodeById(parentId);
   if (!parent) {
-    throw new Error('Parent node not found: ' + parentId);
+    throw new Error(describeUnresolvedId(parentId));
   }
 
   if (!('children' in parent)) {
@@ -3039,17 +3154,26 @@ async function renameNode(params) {
 }
 
 /**
- * Reorder a node (change z-order)
+ * Reorder a node (change z-order).
+ *
+ * `position` is the FINAL index among the node's siblings after the move:
+ * 0 is the bottom of the layer stack, children.length - 1 is the top
+ * (Figma's `children` array is sorted back-to-front). Out-of-range indices are
+ * clamped into range and the response says so.
+ *
+ * Implementation note: Figma does NOT document whether `insertChild(index, node)`
+ * interprets its index before or after the implicit removal when the node is
+ * already a child of the same parent — which is exactly the off-by-one that made
+ * "index 2" land at 1. There is also no `removeChild` (node.remove() DELETES).
+ * So the final sibling order is computed up front and applied with `appendChild`,
+ * which is documented as "adds to the end" and therefore has no index ambiguity.
+ * Only the suffix that actually changes is re-appended. The result is verified by
+ * reading the node's index back out of parent.children.
  */
 async function reorderNode({ nodeId, position }) {
-  var node = await figma.getNodeByIdAsync(nodeId);
+  var node = await resolveNodeById(nodeId);
   if (!node) {
-    throw new Error('Node not found: ' + nodeId);
-  }
-
-  var parent = node.parent;
-  if (!parent) {
-    throw new Error('Node ' + nodeId + ' has no parent');
+    throw new Error(describeUnresolvedId(nodeId));
   }
 
   // Can't reorder pages or document
@@ -3057,43 +3181,101 @@ async function reorderNode({ nodeId, position }) {
     throw new Error('Cannot reorder ' + node.type + ' nodes');
   }
 
-  // Check if parent supports appendChild/insertChild
-  if (!('appendChild' in parent) || !('insertChild' in parent)) {
+  var parent = node.parent;
+  if (!parent) {
+    throw new Error('Node ' + nodeId + ' has no parent');
+  }
+
+  // Check if parent supports appendChild
+  if (!('children' in parent) || !('appendChild' in parent)) {
     throw new Error('Parent does not support reordering');
   }
 
-  var childCount = parent.children.length;
-  var oldIndex = parent.children.indexOf(node);
+  // Figma documents "you can't change the order of children in an instance".
+  // Fail up front rather than half-applying the append sequence.
+  assertNotInstanceSublayer(
+    node,
+    'Reordering',
+    'Reorder the children on the component master instead — the change flows to every instance.'
+  );
+
+  // dynamic-page: children / appendChild on a PageNode need the page loaded first
+  if (parent.type === 'PAGE' && typeof parent.loadAsync === 'function') {
+    await parent.loadAsync();
+  }
+
+  var siblings = parent.children.slice();
+  var childCount = siblings.length;
+  var oldIndex = siblings.indexOf(node);
+  if (oldIndex === -1) {
+    throw new Error('Node ' + node.id + ' is not listed among the children of its parent ' + parent.id);
+  }
+
+  var targetIndex;
+  var clamped = false;
 
   if (position === 'front') {
-    // Bring to front (top of layer stack = end of children array)
-    parent.appendChild(node);
+    targetIndex = childCount - 1;
   } else if (position === 'back') {
-    // Send to back (bottom of layer stack = start of children array)
-    parent.insertChild(0, node);
-  } else if (typeof position === 'number') {
-    // Move to specific index
-    var targetIndex = position;
+    targetIndex = 0;
+  } else if (typeof position === 'number' && isFinite(position)) {
+    targetIndex = Math.round(position);
     if (targetIndex < 0) {
       targetIndex = 0;
-    } else if (targetIndex >= childCount) {
+      clamped = true;
+    } else if (targetIndex > childCount - 1) {
       targetIndex = childCount - 1;
+      clamped = true;
     }
-    parent.insertChild(targetIndex, node);
   } else {
     throw new Error('Invalid position: ' + position + '. Must be "front", "back", or a number.');
   }
 
-  // Get new index
-  var newIndex = parent.children.indexOf(node);
+  if (oldIndex !== targetIndex) {
+    // Desired final order, then append the changed suffix in that order.
+    var desired = siblings.slice();
+    desired.splice(oldIndex, 1);
+    desired.splice(targetIndex, 0, node);
 
-  return {
+    var start = Math.min(oldIndex, targetIndex);
+    for (var i = start; i < desired.length; i++) {
+      parent.appendChild(desired[i]);
+    }
+  }
+
+  // Verify by readback — position is a promise about the final index, so prove it.
+  var newIndex = parent.children.indexOf(node);
+  if (newIndex !== targetIndex) {
+    var err = new Error(
+      'Reorder did not take: node ' + node.id + ' ("' + node.name + '") was asked for final index ' +
+      targetIndex + ' among ' + parent.children.length + ' siblings of "' + parent.name + '" (' +
+      parent.id + ') but reads back at index ' + newIndex + '.'
+    );
+    err.code = 'REORDER_FAILED';
+    err.nodeId = node.id;
+    throw err;
+  }
+
+  var result = {
     success: true,
     nodeId: node.id,
+    parentId: parent.id,
     oldIndex: oldIndex,
     newIndex: newIndex,
-    position: position
+    finalIndex: newIndex,
+    requestedPosition: position,
+    requestedIndex: targetIndex,
+    childCount: parent.children.length,
+    clamped: clamped,
+    verified: true
   };
+
+  if (clamped) {
+    result.message = 'Requested index ' + position + ' is outside the sibling range 0..' +
+      (childCount - 1) + ' — it was clamped to ' + targetIndex + '.';
+  }
+
+  return result;
 }
 
 // ============================================================

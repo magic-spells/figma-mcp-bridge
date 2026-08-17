@@ -2,6 +2,24 @@
  * Mutation tools - tools that modify the Figma document
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Buffer } from 'node:buffer';
+
+// File extension per export format, for the default output path
+const EXPORT_EXTENSIONS = { PNG: 'png', SVG: 'svg', JPG: 'jpg', PDF: 'pdf' };
+
+/**
+ * Build the default on-disk destination for an export.
+ * os.tmpdir()/figma-mcp-bridge/<sanitized-node-id>-<timestamp>.<ext>
+ */
+function defaultExportPath(nodeId, format) {
+  const ext = EXPORT_EXTENSIONS[format] || 'bin';
+  const safeId = String(nodeId).replace(/[^A-Za-z0-9._-]+/g, '-');
+  return path.join(os.tmpdir(), 'figma-mcp-bridge', `${safeId}-${Date.now()}.${ext}`);
+}
+
 /**
  * Set fills on a node
  */
@@ -995,7 +1013,7 @@ export async function handleExportNode(bridge, args) {
     };
   }
 
-  const { nodeId, format, scale } = args;
+  const { nodeId, format, scale, outputPath, returnBase64 } = args;
 
   if (!nodeId) {
     return {
@@ -1012,12 +1030,88 @@ export async function handleExportNode(bridge, args) {
     };
   }
 
-  try {
-    const result = await bridge.sendCommand('export_node', { nodeId, format, scale });
+  if (outputPath !== undefined && outputPath !== null && !path.isAbsolute(outputPath)) {
     return {
       content: [{
         type: 'text',
-        text: JSON.stringify(result, null, 2)
+        text: JSON.stringify({
+          error: {
+            code: 'INVALID_PARAMS',
+            message: `outputPath must be an absolute file path. Got: ${outputPath}`
+          }
+        }, null, 2)
+      }],
+      isError: true
+    };
+  }
+
+  try {
+    const result = await bridge.sendCommand('export_node', { nodeId, format, scale });
+
+    // Escape hatch: callers that genuinely want the bytes inline.
+    if (returnBase64) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify(result, null, 2)
+        }]
+      };
+    }
+
+    if (!result || typeof result.data !== 'string' || result.data.length === 0) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: {
+              code: 'EXPORT_NO_DATA',
+              message: `Figma returned no image data for node ${nodeId}. Nothing was written to disk.`
+            }
+          }, null, 2)
+        }],
+        isError: true
+      };
+    }
+
+    // File-first: decode and write, return the path. Images cannot be viewed
+    // inline as base64, so a path the caller can Read is the useful result.
+    const resolvedFormat = String(format || result.format || 'PNG').toUpperCase();
+    const targetPath = outputPath || defaultExportPath(result.nodeId || nodeId, resolvedFormat);
+    const buffer = Buffer.from(result.data, 'base64');
+
+    try {
+      const dir = path.dirname(targetPath);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(targetPath, buffer);
+    } catch (writeError) {
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            error: {
+              code: 'EXPORT_WRITE_FAILED',
+              message: `Exported node ${nodeId} but could not write the image to ${targetPath}: ${writeError.message}. ` +
+                'Pass a writable absolute outputPath, or returnBase64: true to get the data inline instead.',
+              path: targetPath
+            }
+          }, null, 2)
+        }],
+        isError: true
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          nodeId: result.nodeId || nodeId,
+          path: targetPath,
+          format: resolvedFormat,
+          scale: result.scale !== undefined ? result.scale : scale,
+          bytes: buffer.length,
+          message: 'Image written to disk. Read the file at `path` to view it.'
+        }, null, 2)
       }]
     };
   } catch (error) {

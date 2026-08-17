@@ -236,10 +236,10 @@ export function registerTools(server, bridge) {
   // figma_get_nodes - Get node details by ID
   server.tool(
     'figma_get_nodes',
-    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes (strokeWeight reads "MIXED" plus the four per-side weights when sides differ), auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
+    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes (strokeWeight reads "MIXED" plus the four per-side weights when sides differ), auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. Composite instance-sublayer IDs (the "I<instanceId>;<childId>" form) resolve reliably — if the direct lookup misses, the instance root is resolved and its subtree searched. IDs that genuinely do not exist come back in notFound with an explanation in notFoundDetails. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
     {
       nodeIds: z.array(z.string()).describe('Array of Figma node IDs (e.g., ["1:23", "4:56"])'),
-      depth: z.enum(['minimal', 'compact', 'full']).optional().default('full').describe('Detail level: "minimal" (~5 props: id, name, type, childIds), "compact" (~10 props: + position/size), "full" (all ~40 props). Use minimal/compact for tree traversal to reduce tokens.')
+      depth: z.enum(['minimal', 'compact', 'full']).optional().default('full').describe('Detail level: "minimal" (~5 props: id, name, type, childIds), "compact" (~10 props: + x/y/width/height + childIds), "full" (all ~40 props). Use minimal/compact for tree traversal to reduce tokens.')
     },
     async (args) => handleGetNodes(bridge, args)
   );
@@ -522,11 +522,18 @@ export function registerTools(server, bridge) {
   // figma_export_node - Export a node as an image
   server.tool(
     'figma_export_node',
-    'Export a node as an image (PNG, SVG, JPG, or PDF). Returns base64-encoded data.',
+    'Export a node as an image (PNG, SVG, JPG, or PDF). The image is WRITTEN TO DISK and the file path is returned — ' +
+    'read that file to actually view the render (inline base64 cannot be viewed, which is why this is file-first). ' +
+    'Response is { success, nodeId, path, format, scale, bytes } with no inline image data. ' +
+    'Pass outputPath to choose the destination; omit it and the file lands in the OS temp dir under figma-mcp-bridge/. ' +
+    'Set returnBase64: true only if you genuinely need the raw data inline instead of a file. ' +
+    'Exporting and LOOKING at the render is the only way to catch composition problems that property readback cannot see.',
     {
       nodeId: z.string().describe('The node ID to export'),
       format: z.enum(['PNG', 'SVG', 'JPG', 'PDF']).optional().default('PNG').describe('Export format'),
-      scale: z.number().optional().default(1).describe('Export scale (1 = 100%, 2 = 200%, etc.)')
+      scale: z.number().optional().default(1).describe('Export scale (1 = 100%, 2 = 200%, etc.). No need to inflate this to make the image viewable — the file on disk is viewable at any size.'),
+      outputPath: z.string().optional().describe('Absolute file path to write the image to. Parent directories are created. Omit for an auto-named file in the OS temp dir.'),
+      returnBase64: z.boolean().optional().default(false).describe('Return base64 image data inline instead of writing a file. Rarely what you want — the inline data cannot be viewed.')
     },
     async (args) => handleExportNode(bridge, args)
   );
@@ -749,10 +756,10 @@ export function registerTools(server, bridge) {
   // figma_get_children - Get immediate children of a node
   server.tool(
     'figma_get_children',
-    'Get immediate children of a node. Use for browsing hierarchy one level at a time. More efficient than figma_get_nodes for exploring structure.',
+    'Get immediate children of a node. Use for browsing hierarchy one level at a time. More efficient than figma_get_nodes for exploring structure. Compact results include x/y, so they can be used to measure layout (e.g. which children share a row after wrapping). Composite instance-sublayer parent IDs ("I<instanceId>;<childId>") resolve here too.',
     {
       parentId: z.string().describe('Node ID to get children of. REQUIRED.'),
-      compact: z.boolean().optional().default(true).describe('Return minimal data')
+      compact: z.boolean().optional().default(true).describe('Return minimal data (id, name, type, x, y, parentId, childCount). Set false for the full ~40-property serialization.')
     },
     async (args) => handleGetChildren(bridge, args)
   );
@@ -942,14 +949,19 @@ export function registerTools(server, bridge) {
   // figma_reorder_node - Change z-order of a node
   server.tool(
     'figma_reorder_node',
-    'Change the z-order (layer order) of a node. Bring to front, send to back, or move to a specific index.',
+    'Change the z-order (layer order) of a node among its siblings. A numeric position is the FINAL index the node ' +
+    'ends up at — index 2 means the node is at index 2 when the call returns, not one off from it. Figma sorts children ' +
+    'back-to-front, so 0 is the BOTTOM of the layer stack and childCount - 1 is the top; "back" is 0 and "front" is the ' +
+    'last index. Out-of-range indices are clamped into range and the response reports clamped: true with a message. ' +
+    'The final index is verified by reading it back — a mismatch fails with REORDER_FAILED rather than reporting success. ' +
+    'Reordering children of an INSTANCE is blocked by Figma and returns INSTANCE_SUBLAYER_RESTRICTED; reorder on the master instead.',
     {
       nodeId: z.string().describe('The node ID to reorder'),
       position: z.union([
         z.literal('front'),
         z.literal('back'),
         z.number()
-      ]).describe('Position: "front" (top), "back" (bottom), or index number')
+      ]).describe('Final position: "front" (top of stack), "back" (bottom), or the final zero-based index among siblings (0 = bottom)')
     },
     async (args) => handleReorderNode(bridge, args)
   );

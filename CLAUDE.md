@@ -251,6 +251,9 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - `RESIZE_NO_OP` - `resize()` changed nothing and the size still differs from the request
 - `LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED` - A min/max size limit did not stick / did not clear
 - `FIELD_NOT_SUPPORTED` - Node type does not have the requested field
+- `REORDER_FAILED` - The node's index did not read back as the requested final index
+- `EXPORT_WRITE_FAILED` - The export succeeded but the image could not be written to disk (path reported)
+- `EXPORT_NO_DATA` - Figma returned no image bytes, so nothing was written
 
 ### Standard Response Format
 
@@ -294,7 +297,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 8. **WebSocket runs in UI iframe** - Plugin UI thread handles WebSocket, main thread handles Figma API
 
-9. **Export returns base64** - `figma_export_node` returns base64-encoded image data
+9. **Export is file-first** - `figma_export_node` decodes the plugin's base64 **server side** (`src/tools/mutations.js`) and writes the image to disk, returning `{ path, format, bytes }` with no inline data. Default destination is `os.tmpdir()/figma-mcp-bridge/<node-id>-<timestamp>.<ext>`; `outputPath` (absolute) overrides it, directories are created, and an unwritable path returns `EXPORT_WRITE_FAILED`. `returnBase64: true` is the escape hatch. The plugin side still returns base64 over the socket — don't add file IO to `plugin/code.js`, it has no `fs`
 
 10. **Variable paint binding** - Use `figma.variables.setBoundVariableForPaint()` for fills/strokes
 
@@ -302,7 +305,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 12. **`detachInstance()` cascades** - Also detaches ancestor instances, use with caution
 
-13. **Reordering nodes** - Use `parent.appendChild(node)` for front, `parent.insertChild(0, node)` for back (children array is read-only)
+13. **Reordering nodes** - `children` is read-only, so order is changed with `appendChild` / `insertChild`. **Never use `insertChild` to move a node that is already a child of the same parent** — Figma does not document whether the index is interpreted before or after the implicit removal, which is what made `figma_reorder_node` land one slot off. `reorderNode` computes the desired final sibling order and re-`appendChild`s the changed suffix (documented as "adds to the end", so no ambiguity), then verifies the index by readback
 
 14. **`mainComponent` is async** - Use `getMainComponentAsync()` for instances (currently skipped in serialization)
 
@@ -384,6 +387,14 @@ Figma has several writes that report success and change nothing. The rule for th
 46. **min/max size limits: `null` clears, and unbinding leaves a literal behind** - `figma_set_size_limits` sets or clears all four, verifying each readback (`LIMIT_NOT_APPLIED` / `LIMIT_NOT_CLEARED`). It warns when the node is neither an auto-layout frame nor a direct child of one, and when the field is variable-bound (the bind beats the literal). `figma_unbind_variable` on a min/max field additionally sets the residual literal to `null` — without that, unbinding `maxWidth` freezes the last resolved number as a permanent clamp — and reports `previousLiteral` / `clearedLiteral`.
 
 47. **`node.rotation` pivots on the TOP-LEFT, not the center** - Documented Figma behavior. `figma_set_rotation` defaults to `pivot: 'center'` and writes `relativeTransform` instead: read the current transform, compute the visual center in parent space, then solve for the translation that keeps it. Matrix is row-major `[[m00,m01,m02],[m10,m11,m12]]` with `rotation === atan2(-m10, m00)`, so a rotation of θ is `[[cos, sin, tx], [-sin, cos, ty]]`. **Auto-layout children are excluded** — the parent computes their translation and discards the compensating one — so those get a plain rotation plus a `warning` naming the parent, never a silent wrong result. The resulting `rotation` is compared to the request (`angleDelta`, ±180-wrap aware) and every node echoes `appliedPivot` and `absoluteBoundingBox`.
+
+## Ergonomics Constraints
+
+48. **`figma_reorder_node`'s `position` is the FINAL index** - Not an insertion index. 0 is the bottom of the layer stack (Figma sorts `children` back-to-front), `childCount - 1` is the top; `'back'` is 0 and `'front'` is the last index. Out-of-range values are clamped, reported via `clamped: true` + `message`, and the achieved index is verified against the request (`REORDER_FAILED`). See constraint 13 for why `insertChild` is not used. Reordering inside an INSTANCE is documented-blocked, so `assertNotInstanceSublayer` runs first — a mid-sequence throw would otherwise leave the parent half-reordered. A `PAGE` parent gets `await parent.loadAsync()` first (dynamic-page requirement for `children`/`appendChild`).
+
+49. **Node ids resolve through `resolveNodeById`, not raw `getNodeByIdAsync`** - `getNodeByIdAsync` is unreliable for the composite instance-sublayer ids Figma hands back from search and selection (`I<instanceId>;<childId>`), which is why `figma_search_nodes` always worked where `figma_get_nodes` did not. The helper tries the direct lookup, and on a null result for an id containing `';'` walks each ancestor prefix (longest first, with and without the leading `I`) and searches that subtree for an exact `node.id` match. Used by `getNodes`, `getChildren` and `reorderNode`. A genuinely missing id is reported through `describeUnresolvedId()` — `notFound` keeps its shape (array of ids) and `notFoundDetails` carries the explanation. **This is id *resolution*, not an instance-sublayer *check*** — the permission check is still `findInstanceAncestor` (constraint 42), never the `;` heuristic.
+
+50. **Compact serialization carries x/y** - `serializeNodeCompact` (used by `figma_get_children` compact and `figma_search_nodes` compact) includes `x`/`y`; `serializeNode(node, 'compact')` already had x/y/width/height. Measuring child positions is how wrap and row grouping get verified, so compact output without them was useless for geometry. Compact deliberately does **not** carry the full-mode fields (`boundVariables`, `explicitVariableModes`, `layoutWrap`, …) — that is what `depth: 'full'` is for.
 
 ## Running the Server
 
