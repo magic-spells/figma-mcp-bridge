@@ -5,12 +5,25 @@
  * UI thread (ui.html) handles WebSocket connection.
  */
 
-// Show UI (handles WebSocket connection)
-figma.showUI(__html__, { visible: true, width: 200, height: 40 });
+// Show UI (handles WebSocket connection). Wider in Dev Mode to fit the
+// read-only badge.
+figma.showUI(__html__, {
+  visible: true,
+  width: figma.editorType === 'dev' ? 260 : 200,
+  height: 40
+});
 
 // Handle messages from UI
 figma.ui.onmessage = async (msg) => {
-  if (msg.type === 'get_handshake_info') {
+  if (msg.type === 'get_editor_info') {
+    figma.ui.postMessage({
+      type: 'editor_info',
+      payload: {
+        editorType: figma.editorType,
+        readOnly: figma.editorType === 'dev'
+      }
+    });
+  } else if (msg.type === 'get_handshake_info') {
     // Send document info for handshake
     figma.ui.postMessage({
       type: 'handshake_info',
@@ -60,6 +73,8 @@ figma.ui.onmessage = async (msg) => {
 // ============================================================
 
 async function handleCommand(command, payload) {
+  requireWritableEditor(command);
+
   switch (command) {
     case 'ping':
       return { ok: true, timestamp: Date.now() };
@@ -3305,6 +3320,55 @@ function describeCurrentEditor() {
     return 'an unrecognized editor (editorType: "' + type + '")';
   }
   return label + ' (editorType: "' + type + '")';
+}
+
+// Commands that never write to the document, so they are allowed in Dev Mode
+// (figma.editorType === 'dev'), where the plugin API rejects all document
+// mutations. Selection / current-page / viewport changes are not document
+// edits and are permitted. get_reactions is listed so its own
+// requireFigmaDesign() guard produces the accurate error instead of a
+// misleading "read-only" one.
+var DEV_MODE_READ_COMMANDS = {
+  ping: true,
+  get_context: true,
+  list_pages: true,
+  get_nodes: true,
+  get_children: true,
+  search_nodes: true,
+  search_components: true,
+  search_styles: true,
+  search_variables: true,
+  get_local_styles: true,
+  get_local_variables: true,
+  export_node: true,
+  zoom_to_node: true,
+  set_selection: true,
+  set_current_page: true,
+  get_reactions: true
+};
+
+/**
+ * Throws if running in Dev Mode and the command mutates the document.
+ * Dev Mode plugins get a read-only document — writes throw deep inside the
+ * Figma API with unhelpful messages, so this gate fails them up front.
+ * @param {string} command - internal command name (MCP tool is figma_<command>)
+ */
+function requireWritableEditor(command) {
+  if (figma.editorType !== 'dev') return;
+  if (DEV_MODE_READ_COMMANDS[command]) return;
+  var err = new Error(
+    'figma_' + command + ' cannot run in Dev Mode — Dev Mode plugins get a read-only ' +
+    'document, so every mutation tool is unavailable. The plugin is currently running in ' +
+    describeCurrentEditor() + '. ' +
+    'Read tools still work here: figma_get_context, figma_list_pages, figma_get_nodes, ' +
+    'figma_get_children, the figma_search_* tools, figma_get_local_styles, ' +
+    'figma_get_local_variables, and figma_export_node. ' +
+    'To edit this file, open it in the Figma Design editor with an editor seat.'
+  );
+  err.code = 'READ_ONLY_EDITOR';
+  err.editorType = figma.editorType;
+  err.tool = 'figma_' + command;
+  throw err;
 }
 
 /**

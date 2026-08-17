@@ -243,6 +243,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - `OPERATION_FAILED` - Figma API error
 - `WRONG_EDITOR` - FigJam-only tool called outside FigJam (message names the tool + current editorType)
 - `FIGMA_DESIGN_ONLY` - Figma-Design-only tool called outside a design file
+- `READ_ONLY_EDITOR` - Mutation tool called in Dev Mode (`editorType: 'dev'`), where the document is read-only
 - `INSTANCE_SUBLAYER_RESTRICTED` - Resize / size-bind attempted on a node inside an INSTANCE
 - `BIND_NOT_APPLIED` - `setBoundVariable` reported no error but the bind does not read back
 - `UNBIND_FAILED` - Unbind threw, or the field still reads back bound
@@ -332,6 +333,8 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 24. **Stamps/Highlights/WashiTape/Widgets cannot be created from plugins** - Only cloned from existing user-placed instances. They serialize their `stuckTo` node ID for inspection.
 
 25. **`editorType` is exposed in `figma_get_context`** - The union has **five** members: `"figma" | "figjam" | "dev" | "slides" | "buzz"`. The `requireFigJam(toolName)` plugin helper guards FigJam-only commands (`WRONG_EDITOR`); `requireFigmaDesign(toolName)` guards the reverse (`FIGMA_DESIGN_ONLY`). Both take an explicit tool name so the error identifies the tool, says it is FigJam-only / Design-only, and reports the current editor via `describeCurrentEditor()`. Never gate on `!== 'figjam'`.
+
+25b. **Dev Mode is supported read-only** - The manifest includes `"dev"` in `editorType` (plus `capabilities: ["inspect"]` so the UI iframe — which hosts the WebSocket, see constraint 8 — renders in the inspect panel). Dev Mode plugins get a read-only document, so `requireWritableEditor(command)` runs at the top of `handleCommand` and throws `READ_ONLY_EDITOR` for anything not in the `DEV_MODE_READ_COMMANDS` whitelist (get/search/export tools plus selection/current-page/viewport, which are not document edits). `get_reactions` is whitelisted so its own `requireFigmaDesign()` guard produces the accurate error. When adding a new read-only command, add it to the whitelist — new commands are treated as writes by default. The UI shows a "read-only" badge in Dev Mode (via the `get_editor_info` → `editor_info` message pair) and the window is widened to 260px to fit it.
 
 26. **`StickyNode.authorName` / `authorVisible` are read-only at runtime** - Figma's docs list them as R/W, but the FigJam plugin runtime throws "no setter for property" on assignment. Figma auto-populates both from the active user's identity. The schemas for `figma_create_sticky` / `figma_set_sticky` deliberately do NOT expose these. Don't add them back unless you've verified the runtime accepts writes.
 

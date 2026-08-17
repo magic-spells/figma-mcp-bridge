@@ -45,6 +45,13 @@
       #status-indicator.connecting {
         color: #c2410c;
       }
+      #readonly-badge {
+        color: #999;
+        border: 1px solid #444;
+        border-radius: 4px;
+        padding: 2px 5px;
+        white-space: nowrap;
+      }
     </style>
   </head>
   <body>
@@ -64,6 +71,12 @@
         title="Disconnected — click to reconnect"
         onclick="manualReconnect()"
         >✓</span
+      >
+      <span
+        id="readonly-badge"
+        hidden
+        title="Dev Mode — the document is read-only, so only get/search/export tools work"
+        >read-only</span
       >
     </div>
 
@@ -209,9 +222,13 @@
           sendToServer({ type: "handshake", payload: msg.payload });
         } else if (msg.type === "command_response") {
           sendToServer({ responseTo: msg.requestId, payload: msg.payload });
+        } else if (msg.type === "editor_info") {
+          document.getElementById("readonly-badge").hidden =
+            !msg.payload.readOnly;
         }
       };
 
+      parent.postMessage({ pluginMessage: { type: "get_editor_info" } }, "*");
       connect();
     </script>
   </body>
