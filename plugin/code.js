@@ -90,6 +90,10 @@ async function handleCommand(command, payload) {
       return await resizeNodes(payload);
     case 'set_opacity':
       return await setOpacity(payload);
+    case 'set_visible':
+      return await setVisible(payload);
+    case 'set_clips_content':
+      return await setClipsContent(payload);
     case 'set_corner_radius':
       return await setCornerRadius(payload);
     case 'group_nodes':
@@ -162,6 +166,8 @@ async function handleCommand(command, payload) {
       return await createPaintStyle(payload);
     case 'create_text_style':
       return await createTextStyle(payload);
+    case 'delete_style':
+      return await deleteStyle(payload);
     case 'create_variable_collection':
       return await createVariableCollection(payload);
     case 'create_variable':
@@ -182,6 +188,8 @@ async function handleCommand(command, payload) {
       return await deleteMode(payload);
     case 'unbind_variable':
       return await unbindVariable(payload);
+    case 'set_variable_mode':
+      return await setVariableMode(payload);
     // Page Management commands
     case 'create_page':
       return await createPage(payload);
@@ -348,10 +356,14 @@ async function setFills({ nodeId, fills }) {
 /**
  * Set strokes on a node
  * @param {string} nodeId - Node ID
- * @param {Array|Object} strokes - Stroke array or shorthand
- * @param {number} strokeWeight - Optional stroke weight
+ * @param {Array|Object} strokes - Stroke array or shorthand (optional — omit to leave colors alone)
+ * @param {number} strokeWeight - Optional uniform stroke weight
+ * @param {number} strokeTopWeight - Optional per-side weights (frame-likes and rectangles only)
+ * @param {number} strokeRightWeight
+ * @param {number} strokeBottomWeight
+ * @param {number} strokeLeftWeight
  */
-async function setStrokes({ nodeId, strokes, strokeWeight }) {
+async function setStrokes({ nodeId, strokes, strokeWeight, strokeTopWeight, strokeRightWeight, strokeBottomWeight, strokeLeftWeight }) {
   const node = await figma.getNodeByIdAsync(nodeId);
   if (!node) {
     throw new Error(`Node not found: ${nodeId}`);
@@ -360,20 +372,63 @@ async function setStrokes({ nodeId, strokes, strokeWeight }) {
     throw new Error(`Node ${nodeId} does not support strokes`);
   }
 
-  // Convert shorthand to full strokes array
-  const strokesArray = normalizeFills(strokes); // Same format as fills
-  node.strokes = strokesArray;
+  const hasPerSide =
+    strokeTopWeight !== undefined ||
+    strokeRightWeight !== undefined ||
+    strokeBottomWeight !== undefined ||
+    strokeLeftWeight !== undefined;
 
+  // Per-side weights live on IndividualStrokesMixin: RECTANGLE plus the frame-likes
+  // (FRAME, COMPONENT, COMPONENT_SET, INSTANCE, SLOT, SLIDE). Error rather than
+  // silently dropping them on unsupported types.
+  if (hasPerSide && !('strokeTopWeight' in node)) {
+    throw new Error(`Node ${nodeId} (${node.type}) does not support per-side stroke weights. Supported types: RECTANGLE, FRAME, COMPONENT, COMPONENT_SET, INSTANCE, SLOT, SLIDE.`);
+  }
+
+  // Convert shorthand to full strokes array (omit strokes to change weights only)
+  if (strokes !== undefined) {
+    node.strokes = normalizeFills(strokes); // Same format as fills
+  }
+
+  // Uniform weight first, so per-side values below can override individual sides
   if (strokeWeight !== undefined && 'strokeWeight' in node) {
     node.strokeWeight = strokeWeight;
   }
 
-  return {
+  if (hasPerSide) {
+    if (strokeTopWeight !== undefined) node.strokeTopWeight = strokeTopWeight;
+    if (strokeRightWeight !== undefined) node.strokeRightWeight = strokeRightWeight;
+    if (strokeBottomWeight !== undefined) node.strokeBottomWeight = strokeBottomWeight;
+    if (strokeLeftWeight !== undefined) node.strokeLeftWeight = strokeLeftWeight;
+  }
+
+  const result = {
     success: true,
     nodeId: node.id,
     strokes: clone(node.strokes),
-    strokeWeight: node.strokeWeight
+    strokeWeight: readStrokeWeight(node)
   };
+
+  if ('strokeTopWeight' in node) {
+    result.strokeTopWeight = node.strokeTopWeight;
+    result.strokeRightWeight = node.strokeRightWeight;
+    result.strokeBottomWeight = node.strokeBottomWeight;
+    result.strokeLeftWeight = node.strokeLeftWeight;
+  }
+
+  return result;
+}
+
+/**
+ * Read a node's aggregate stroke weight.
+ * Returns the string 'MIXED' when per-side weights differ — figma.mixed is a Symbol
+ * and would otherwise serialize to null and read as "no stroke weight".
+ */
+function readStrokeWeight(node) {
+  if (!('strokeWeight' in node)) {
+    return undefined;
+  }
+  return node.strokeWeight === figma.mixed ? 'MIXED' : node.strokeWeight;
 }
 
 /**
@@ -657,6 +712,86 @@ async function setOpacity({ nodeId, opacity }) {
     success: true,
     nodeId: node.id,
     opacity: node.opacity
+  };
+}
+
+/**
+ * Show or hide nodes
+ * @param {string[]} nodeIds - Array of node IDs
+ * @param {boolean} visible - true to show, false to hide
+ */
+async function setVisible({ nodeIds, visible }) {
+  const nodes = [];
+  const notFound = [];
+
+  for (const nodeId of nodeIds) {
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      notFound.push(nodeId);
+      continue;
+    }
+
+    if (!('visible' in node)) {
+      throw new Error(`Node ${nodeId} (${node.type}) does not support visibility`);
+    }
+
+    node.visible = visible;
+
+    nodes.push({
+      nodeId: node.id,
+      name: node.name,
+      type: node.type,
+      visible: node.visible
+    });
+  }
+
+  return {
+    success: true,
+    nodes,
+    notFound
+  };
+}
+
+/**
+ * Set clipsContent on frame-like nodes
+ * @param {string[]} nodeIds - Array of node IDs
+ * @param {boolean} clipsContent - Whether children are clipped to the frame bounds
+ */
+async function setClipsContent({ nodeIds, clipsContent }) {
+  const resolved = [];
+  const notFound = [];
+
+  // Resolve and validate everything before mutating so an unsupported type
+  // doesn't leave the batch half-applied.
+  for (const nodeId of nodeIds) {
+    const node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      notFound.push(nodeId);
+      continue;
+    }
+
+    if (!('clipsContent' in node)) {
+      throw new Error(`Node ${nodeId} (${node.type}) does not support clipsContent. Supported types: FRAME, COMPONENT, COMPONENT_SET, INSTANCE, SLOT, SLIDE.`);
+    }
+
+    resolved.push(node);
+  }
+
+  const nodes = [];
+  for (const node of resolved) {
+    node.clipsContent = clipsContent;
+    nodes.push({
+      nodeId: node.id,
+      name: node.name,
+      type: node.type,
+      clipsContent: node.clipsContent
+    });
+  }
+
+  return {
+    success: true,
+    nodes,
+    notFound
   };
 }
 
@@ -2028,13 +2163,14 @@ async function getChildren(params) {
 }
 
 /**
- * Set variable value or bind variable to node
+ * Set variable value, or bind a variable to a node property or a style property
  */
 async function setVariable(params) {
   var variableId = params.variableId;
   var modeId = params.modeId;
   var value = params.value;
   var nodeId = params.nodeId;
+  var styleId = params.styleId;
   var field = params.field;
   var paintIndex = params.paintIndex !== undefined ? params.paintIndex : 0;
 
@@ -2058,11 +2194,19 @@ async function setVariable(params) {
     };
   }
 
+  // Operation 2b: Bind variable to a style property (paint or text style).
+  // Checked before the node path so an explicit styleId always wins.
+  if (styleId && field) {
+    return await bindVariableToStyle(styleId, field, variable, paintIndex);
+  }
+
   // Operation 2: Bind variable to node property
   if (nodeId && field) {
     var node = await figma.getNodeByIdAsync(nodeId);
     if (!node) {
-      throw new Error('Node not found: ' + nodeId);
+      // Style IDs (S:...) never resolve as nodes — fall through to the style path
+      // rather than reporting a bogus "Node not found".
+      return await bindVariableToStyle(nodeId, field, variable, paintIndex);
     }
 
     // Check if this is a fills/strokes binding (requires special handling)
@@ -2139,7 +2283,85 @@ async function setVariable(params) {
     };
   }
 
-  throw new Error('Must provide either (modeId + value) to set variable value, or (nodeId + field) to bind variable');
+  throw new Error('Must provide either (modeId + value) to set variable value, or (nodeId + field) / (styleId + field) to bind variable');
+}
+
+// Fields a TextStyle can bind (VariableBindableTextField)
+var TEXT_STYLE_BINDABLE_FIELDS = [
+  'fontFamily', 'fontSize', 'fontStyle', 'fontWeight',
+  'letterSpacing', 'lineHeight', 'paragraphSpacing', 'paragraphIndent'
+];
+
+/**
+ * Bind a variable to a local style property.
+ * TEXT styles use style.setBoundVariable(field, variable).
+ * PAINT styles go through figma.variables.setBoundVariableForPaint, which returns a
+ * COPY of the paint — the copy must be assigned back onto style.paints or the bind
+ * silently does nothing.
+ */
+async function bindVariableToStyle(styleId, field, variable, paintIndex) {
+  var style = await figma.getStyleByIdAsync(styleId);
+  if (!style) {
+    throw new Error('Node or style not found: ' + styleId);
+  }
+
+  if (style.type === 'TEXT') {
+    if (TEXT_STYLE_BINDABLE_FIELDS.indexOf(field) === -1) {
+      throw new Error('Text styles cannot bind "' + field + '". Bindable fields: ' + TEXT_STYLE_BINDABLE_FIELDS.join(', '));
+    }
+
+    style.setBoundVariable(field, variable);
+
+    return {
+      success: true,
+      operation: 'bindToStyle',
+      variableId: variable.id,
+      variableName: variable.name,
+      styleId: style.id,
+      styleName: style.name,
+      styleType: style.type,
+      field: field,
+      boundVariables: clone(style.boundVariables) || {}
+    };
+  }
+
+  if (style.type === 'PAINT') {
+    if (field !== 'paints' && field !== 'color' && field !== 'fills') {
+      throw new Error('Paint styles can only bind a color. Use field "paints" (aliases: "color", "fills").');
+    }
+
+    if (variable.resolvedType !== 'COLOR') {
+      throw new Error('Cannot bind ' + variable.resolvedType + ' variable to a paint style. Only COLOR variables can be bound to paints.');
+    }
+
+    var paints = clone(style.paints);
+    if (!paints || !paints[paintIndex]) {
+      throw new Error('Paint not found at index ' + paintIndex + ' on style ' + styleId);
+    }
+    if (paints[paintIndex].type !== 'SOLID') {
+      throw new Error('Paint at index ' + paintIndex + ' must be a SOLID paint to bind a color variable');
+    }
+
+    // Returns a copy — reassigning style.paints is the actual write
+    paints[paintIndex] = figma.variables.setBoundVariableForPaint(paints[paintIndex], 'color', variable);
+    style.paints = paints;
+
+    return {
+      success: true,
+      operation: 'bindToStyle',
+      variableId: variable.id,
+      variableName: variable.name,
+      styleId: style.id,
+      styleName: style.name,
+      styleType: style.type,
+      field: 'paints',
+      paintIndex: paintIndex,
+      boundVariables: clone(style.boundVariables) || {},
+      paints: clone(style.paints)
+    };
+  }
+
+  throw new Error('Style ' + styleId + ' (' + style.type + ') does not support variable binding. Only TEXT and PAINT styles do.');
 }
 
 /**
@@ -2969,6 +3191,48 @@ async function createTextStyle({ name, fontFamily = 'Inter', fontStyle = 'Regula
 }
 
 /**
+ * Delete a local style (paint, text, effect or grid)
+ */
+async function deleteStyle({ styleId }) {
+  var style = await figma.getStyleByIdAsync(styleId);
+  if (!style) {
+    return {
+      error: {
+        code: 'STYLE_NOT_FOUND',
+        message: 'Style not found: ' + styleId
+      }
+    };
+  }
+
+  // remove() only works on local styles — library styles must be unsubscribed instead
+  if (style.remote) {
+    return {
+      error: {
+        code: 'REMOTE_STYLE',
+        message: 'Cannot delete "' + style.name + '" (' + styleId + '): it belongs to a subscribed library, not this file.'
+      }
+    };
+  }
+
+  var info = {
+    styleId: style.id,
+    name: style.name,
+    type: style.type,
+    key: style.key
+  };
+
+  style.remove();
+
+  return {
+    success: true,
+    styleId: info.styleId,
+    name: info.name,
+    type: info.type,
+    key: info.key
+  };
+}
+
+/**
  * Create a new variable collection
  */
 async function createVariableCollection({ name, modes }) {
@@ -3360,6 +3624,92 @@ async function unbindVariable({ nodeId, field, paintIndex }) {
   };
 }
 
+/**
+ * Pin or unpin an explicit variable mode on nodes (scene nodes and pages).
+ * Under documentAccess: "dynamic-page" the setters MUST be handed the collection
+ * object — the collectionId overloads throw. Both setters are synchronous.
+ * @param {string[]} nodeIds - Nodes (or pages) to pin/unpin
+ * @param {string} collectionId - Variable collection the pin applies to
+ * @param {string} modeId - Mode to pin (required unless clear is true)
+ * @param {boolean} clear - true to remove the pin for this collection
+ */
+async function setVariableMode({ nodeIds, collectionId, modeId, clear = false }) {
+  var collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+  if (!collection) {
+    return {
+      error: {
+        code: 'COLLECTION_NOT_FOUND',
+        message: 'Variable collection not found: ' + collectionId
+      }
+    };
+  }
+
+  var mode = null;
+  if (!clear) {
+    for (var i = 0; i < collection.modes.length; i++) {
+      if (collection.modes[i].modeId === modeId) {
+        mode = collection.modes[i];
+        break;
+      }
+    }
+
+    if (!mode) {
+      var validModes = collection.modes.map(function (m) {
+        return m.name + ' (' + m.modeId + ')';
+      }).join(', ');
+      return {
+        error: {
+          code: 'MODE_NOT_FOUND',
+          message: 'Mode "' + modeId + '" does not belong to collection "' + collection.name + '" (' + collection.id + '). Valid modes: ' + validModes
+        }
+      };
+    }
+  }
+
+  var nodes = [];
+  var notFound = [];
+
+  for (var j = 0; j < nodeIds.length; j++) {
+    var nodeId = nodeIds[j];
+    var node = await figma.getNodeByIdAsync(nodeId);
+    if (!node) {
+      notFound.push(nodeId);
+      continue;
+    }
+
+    // Available on every scene node and on PageNode
+    if (!('setExplicitVariableModeForCollection' in node)) {
+      throw new Error('Node ' + nodeId + ' (' + node.type + ') does not support explicit variable modes');
+    }
+
+    if (clear) {
+      node.clearExplicitVariableModeForCollection(collection);
+    } else {
+      node.setExplicitVariableModeForCollection(collection, modeId);
+    }
+
+    nodes.push({
+      nodeId: node.id,
+      name: node.name,
+      type: node.type,
+      // Echo the readback so the caller can verify the pin in the same call.
+      // An empty object means no modes are pinned on this node at all.
+      explicitVariableModes: clone(node.explicitVariableModes) || {}
+    });
+  }
+
+  return {
+    success: true,
+    operation: clear ? 'clear' : 'set',
+    collectionId: collection.id,
+    collectionName: collection.name,
+    modeId: clear ? undefined : modeId,
+    modeName: clear ? undefined : mode.name,
+    nodes: nodes,
+    notFound: notFound
+  };
+}
+
 // ============================================================
 // Node Serialization
 // ============================================================
@@ -3427,7 +3777,17 @@ function serializeNode(node, depth) {
   }
   if ('strokes' in node) {
     base.strokes = clone(node.strokes);
-    base.strokeWeight = node.strokeWeight;
+    // strokeWeight is figma.mixed (a Symbol) when per-side weights differ — readStrokeWeight
+    // turns that into 'MIXED', and the per-side values are surfaced alongside it.
+    if ('strokeWeight' in node) {
+      base.strokeWeight = readStrokeWeight(node);
+      if (base.strokeWeight === 'MIXED' && 'strokeTopWeight' in node) {
+        base.strokeTopWeight = node.strokeTopWeight;
+        base.strokeRightWeight = node.strokeRightWeight;
+        base.strokeBottomWeight = node.strokeBottomWeight;
+        base.strokeLeftWeight = node.strokeLeftWeight;
+      }
+    }
     if ('strokeAlign' in node) {
       base.strokeAlign = node.strokeAlign;
     }
@@ -3577,7 +3937,8 @@ function serializeNode(node, depth) {
   }
 
   // Variable modes pinned on this node — { [collectionId]: modeId }
-  // Pins travel through clone/instance and cannot be cleared, so surface them.
+  // Pins travel through clone/instance, so surface them. Set or clear one with
+  // figma_set_variable_mode.
   if ('explicitVariableModes' in node && node.explicitVariableModes) {
     var explicitModes = clone(node.explicitVariableModes);
     if (explicitModes && Object.keys(explicitModes).length > 0) {

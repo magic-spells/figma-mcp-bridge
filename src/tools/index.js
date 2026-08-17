@@ -112,7 +112,12 @@ import {
   handleGetReactions,
   handleAddReaction,
   handleRemoveReaction,
-  handleSetFlowStartingPoint
+  handleSetFlowStartingPoint,
+  // Visibility / clipping / style deletion / variable modes
+  handleSetVisible,
+  handleSetClipsContent,
+  handleDeleteStyle,
+  handleSetVariableMode
 } from './mutations.js';
 
 // Read package.json once at module load — used by figma_server_info to surface the running version
@@ -230,7 +235,7 @@ export function registerTools(server, bridge) {
   // figma_get_nodes - Get node details by ID
   server.tool(
     'figma_get_nodes',
-    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes, auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
+    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes (strokeWeight reads "MIXED" plus the four per-side weights when sides differ), auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
     {
       nodeIds: z.array(z.string()).describe('Array of Figma node IDs (e.g., ["1:23", "4:56"])'),
       depth: z.enum(['minimal', 'compact', 'full']).optional().default('full').describe('Detail level: "minimal" (~5 props: id, name, type, childIds), "compact" (~10 props: + position/size), "full" (all ~40 props). Use minimal/compact for tree traversal to reduce tokens.')
@@ -253,14 +258,18 @@ export function registerTools(server, bridge) {
     async (args) => handleSetFills(bridge, args)
   );
 
-  // figma_set_strokes - Set stroke colors on a node
+  // figma_set_strokes - Set stroke colors and weights on a node
   server.tool(
     'figma_set_strokes',
-    'Set stroke color. Accepts hex shorthand or strokes array.',
+    'Set stroke color and/or weight. Accepts hex shorthand or strokes array. Supports per-side weights (strokeTopWeight etc.) for border-top-only style dividers — no need to fake them with 1px rectangles. Omit `strokes` to change weights only.',
     {
       nodeId: z.string().describe('The node ID to modify'),
-      strokes: colorSchema.describe('Stroke color - use { color: "#RRGGBB" } for simple colors'),
-      strokeWeight: z.number().optional().describe('Stroke weight in pixels')
+      strokes: colorSchema.optional().describe('Stroke color - use { color: "#RRGGBB" } for simple colors. Omit to leave existing stroke colors untouched.'),
+      strokeWeight: z.number().optional().describe('Uniform stroke weight in pixels (applied before any per-side weights)'),
+      strokeTopWeight: z.number().optional().describe('Top stroke weight in pixels. RECTANGLE / FRAME / COMPONENT / COMPONENT_SET / INSTANCE / SLOT / SLIDE only — errors on other types.'),
+      strokeRightWeight: z.number().optional().describe('Right stroke weight in pixels (same node-type restriction as strokeTopWeight)'),
+      strokeBottomWeight: z.number().optional().describe('Bottom stroke weight in pixels (same node-type restriction as strokeTopWeight)'),
+      strokeLeftWeight: z.number().optional().describe('Left stroke weight in pixels (same node-type restriction as strokeTopWeight)')
     },
     async (args) => handleSetStrokes(bridge, args)
   );
@@ -355,6 +364,28 @@ export function registerTools(server, bridge) {
       opacity: z.number().min(0).max(1).describe('Opacity value from 0 (transparent) to 1 (opaque)')
     },
     async (args) => handleSetOpacity(bridge, args)
+  );
+
+  // figma_set_visible - Show or hide nodes
+  server.tool(
+    'figma_set_visible',
+    'Show or hide nodes. Sets node.visible directly — use this instead of binding a BOOLEAN variable or setting opacity to 0 just to hide something. Response echoes each node\'s resulting visibility.',
+    {
+      nodeIds: z.array(z.string()).describe('Array of node IDs to show or hide'),
+      visible: z.boolean().describe('true to show, false to hide')
+    },
+    async (args) => handleSetVisible(bridge, args)
+  );
+
+  // figma_set_clips_content - Toggle content clipping on frame-like nodes
+  server.tool(
+    'figma_set_clips_content',
+    'Set whether frame-like nodes clip their children to the frame bounds. Works on FRAME, COMPONENT, COMPONENT_SET, INSTANCE, SLOT and SLIDE — other node types return an error. Response echoes the resulting clipsContent. Read it back with figma_get_nodes.',
+    {
+      nodeIds: z.array(z.string()).describe('Array of node IDs to modify'),
+      clipsContent: z.boolean().describe('true to clip children to the frame bounds, false to let them overflow')
+    },
+    async (args) => handleSetClipsContent(bridge, args)
   );
 
   // figma_set_corner_radius - Set corner radius
@@ -693,7 +724,7 @@ export function registerTools(server, bridge) {
   // figma_set_variable - Set variable value or bind to node
   server.tool(
     'figma_set_variable',
-    'Set the value of an existing variable for a specific mode, or bind a variable to a node property.',
+    'Set the value of an existing variable for a specific mode, or bind a variable to a node property OR to a local style. Styles are supported: pass styleId (or a style ID as nodeId) with field. TEXT styles bind fontFamily, fontSize, fontStyle, fontWeight, letterSpacing, lineHeight, paragraphSpacing, paragraphIndent; PAINT styles bind their color via field "paints". Style binds echo the style\'s boundVariables so the bind is verifiable in the same call.',
     {
       variableId: z.string().describe('The variable ID to set or bind'),
       modeId: z.string().optional().describe('Mode ID to set value for (required when setting value)'),
@@ -708,9 +739,10 @@ export function registerTools(server, bridge) {
           a: z.number().min(0).max(1).optional().describe('Alpha (0-1)')
         })
       ]).optional().describe('The value to set (number, string, boolean, or color object)'),
-      nodeId: z.string().optional().describe('Node ID to bind variable to (for binding operation)'),
-      field: z.string().optional().describe('Node field to bind to (e.g., "opacity", "cornerRadius", "fills", "strokes")'),
-      paintIndex: z.number().optional().default(0).describe('Paint array index when binding to fills or strokes')
+      nodeId: z.string().optional().describe('Node ID to bind variable to (for binding operation). A style ID passed here is routed to the style path.'),
+      styleId: z.string().optional().describe('Local style ID to bind variable to (e.g., "S:abc123..."). Use instead of nodeId to bind a TEXT or PAINT style.'),
+      field: z.string().optional().describe('Field to bind. Nodes: "opacity", "cornerRadius", "fills", "strokes", etc. Text styles: "fontSize", "lineHeight", "letterSpacing", "paragraphSpacing", "paragraphIndent", "fontFamily", "fontStyle", "fontWeight". Paint styles: "paints".'),
+      paintIndex: z.number().optional().default(0).describe('Paint array index when binding to fills, strokes, or a paint style')
     },
     async (args) => handleSetVariable(bridge, args)
   );
@@ -948,6 +980,16 @@ export function registerTools(server, bridge) {
     async (args) => handleCreateTextStyle(bridge, args)
   );
 
+  // figma_delete_style - Delete a local style
+  server.tool(
+    'figma_delete_style',
+    'Delete a local style (paint, text, effect or grid) from the document. Only local styles can be deleted — styles from a subscribed library return a REMOTE_STYLE error. Use with caution: nodes using the style keep their resolved values but lose the link. Find style IDs with figma_search_styles.',
+    {
+      styleId: z.string().describe('The style ID to delete (e.g., "S:abc123...")')
+    },
+    async (args) => handleDeleteStyle(bridge, args)
+  );
+
   // figma_create_variable_collection - Create a variable collection
   server.tool(
     'figma_create_variable_collection',
@@ -1061,6 +1103,19 @@ export function registerTools(server, bridge) {
       modeId: z.string().describe('The mode ID to delete')
     },
     async (args) => handleDeleteMode(bridge, args)
+  );
+
+  // figma_set_variable_mode - Pin or unpin an explicit variable mode on nodes/pages
+  server.tool(
+    'figma_set_variable_mode',
+    'Pin an explicit variable mode on nodes or pages, or clear an existing pin. This is how a preview/page frame is made to resolve a particular mode (e.g. a mobile frame pinned to the Spacing collection\'s "mobile" mode) — no more cloning a frame just to inherit its mode. Pass clear: true to unpin, which fixes a bad pin inherited through a clone or component master. Works on scene nodes AND page IDs. The response echoes each node\'s resulting explicitVariableModes map so the change is verifiable in the same call ({} means nothing is pinned).',
+    {
+      nodeIds: z.array(z.string()).describe('Array of node IDs or page IDs to pin/unpin'),
+      collectionId: z.string().describe('Variable collection ID the pin applies to (pins are per-collection)'),
+      modeId: z.string().optional().describe('Mode ID to pin. Required unless clear is true. Must belong to collectionId — the error lists the valid modes if it does not.'),
+      clear: z.boolean().optional().default(false).describe('true to remove this collection\'s pin from the nodes instead of setting one')
+    },
+    async (args) => handleSetVariableMode(bridge, args)
   );
 
   // figma_unbind_variable - Remove variable binding from a node

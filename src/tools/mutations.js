@@ -63,7 +63,7 @@ export async function handleSetFills(bridge, args) {
 }
 
 /**
- * Set strokes on a node
+ * Set strokes (colors and/or uniform + per-side weights) on a node
  */
 export async function handleSetStrokes(bridge, args) {
   if (!bridge.isConnected()) {
@@ -81,7 +81,7 @@ export async function handleSetStrokes(bridge, args) {
     };
   }
 
-  const { nodeId, strokes, strokeWeight } = args;
+  const { nodeId } = args;
 
   if (!nodeId) {
     return {
@@ -99,7 +99,8 @@ export async function handleSetStrokes(bridge, args) {
   }
 
   try {
-    const result = await bridge.sendCommand('set_strokes', { nodeId, strokes, strokeWeight });
+    // Pass args through so strokes, strokeWeight and the four per-side weights all reach the plugin
+    const result = await bridge.sendCommand('set_strokes', args);
     return {
       content: [{
         type: 'text',
@@ -1510,7 +1511,7 @@ export async function handleSearchVariables(bridge, args) {
 }
 
 /**
- * Set variable value or bind variable to node
+ * Set variable value, or bind variable to a node or style property
  */
 export async function handleSetVariable(bridge, args) {
   if (!bridge.isConnected()) {
@@ -1528,7 +1529,7 @@ export async function handleSetVariable(bridge, args) {
     };
   }
 
-  const { variableId, modeId, value, nodeId, field } = args;
+  const { variableId, modeId, value, nodeId, styleId, field } = args;
 
   if (!variableId) {
     return {
@@ -1561,14 +1562,14 @@ export async function handleSetVariable(bridge, args) {
     };
   }
 
-  if (nodeId && !field) {
+  if ((nodeId || styleId) && !field) {
     return {
       content: [{
         type: 'text',
         text: JSON.stringify({
           error: {
             code: 'INVALID_PARAMS',
-            message: 'field is required when binding to a node'
+            message: 'field is required when binding to a node or style'
           }
         }, null, 2)
       }],
@@ -4190,4 +4191,83 @@ export async function handleRemoveReaction(bridge, args) {
 
 export async function handleSetFlowStartingPoint(bridge, args) {
   return runCommand(bridge, 'set_flow_starting_point', args);
+}
+
+// ============================================================
+// Visibility, clipping, style deletion, variable modes
+// ============================================================
+
+/**
+ * Invalid-params response in the standard MCP shape
+ */
+function invalidParams(message) {
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: { code: 'INVALID_PARAMS', message }
+      }, null, 2)
+    }],
+    isError: true
+  };
+}
+
+/**
+ * Show or hide nodes
+ */
+export async function handleSetVisible(bridge, args) {
+  const { nodeIds } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node IDs');
+  }
+
+  return runCommand(bridge, 'set_visible', args);
+}
+
+/**
+ * Set clipsContent on frame-like nodes
+ */
+export async function handleSetClipsContent(bridge, args) {
+  const { nodeIds } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node IDs');
+  }
+
+  return runCommand(bridge, 'set_clips_content', args);
+}
+
+/**
+ * Delete a local style
+ */
+export async function handleDeleteStyle(bridge, args) {
+  const { styleId } = args;
+
+  if (!styleId) {
+    return invalidParams('styleId is required');
+  }
+
+  return runCommand(bridge, 'delete_style', args);
+}
+
+/**
+ * Pin or unpin an explicit variable mode on nodes/pages
+ */
+export async function handleSetVariableMode(bridge, args) {
+  const { nodeIds, collectionId, modeId, clear } = args;
+
+  if (!nodeIds || !Array.isArray(nodeIds) || nodeIds.length === 0) {
+    return invalidParams('nodeIds must be a non-empty array of node or page IDs');
+  }
+
+  if (!collectionId) {
+    return invalidParams('collectionId is required');
+  }
+
+  if (!clear && !modeId) {
+    return invalidParams('modeId is required unless clear is true');
+  }
+
+  return runCommand(bridge, 'set_variable_mode', args);
 }

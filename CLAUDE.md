@@ -23,7 +23,7 @@ src/
 ├── server.js          # MCP server setup (McpServer configuration)
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (88 tools — 63 Figma + 21 FigJam + 4 Prototype)
+    ├── index.js       # Tool registration with Zod schemas (92 tools — 67 Figma + 21 FigJam + 4 Prototype)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
@@ -342,6 +342,18 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - **URL action requires a click-like trigger** — `ON_HOVER` + `URL` is rejected. Use `ON_CLICK` or one of the mouse triggers.
 - **`overlayRelativePosition` requires `overlayPosition: MANUAL` on the destination frame** — without that, `setReactionsAsync` rejects the OVERLAY action. Plain OVERLAY navigation (no relative position) works fine.
 - **`SCROLL_TO` navigation requires the destination be a scrollable child of the source's container** — pointing it at a separate top-level frame is rejected. Same for `SCROLL_ANIMATE` transitions in unrelated contexts.
+
+## Variable / Style Constraints
+
+36. **`setExplicitVariableModeForCollection` must be passed a collection OBJECT** - The `(collectionId, modeId)` string overload is deprecated and **throws** under `documentAccess: dynamic-page`. Fetch with `await figma.variables.getVariableCollectionByIdAsync(id)` first. Same for `clearExplicitVariableModeForCollection(collection)` — it is a real, separate method, not `setExplicit...(collection, null)`. Both setters are **synchronous**. Available on every scene node **and** on `PageNode`. See `setVariableMode` in `plugin/code.js`.
+
+37. **`figma.variables.setBoundVariableForPaint` returns a COPY** - It does not mutate. You must assign the returned paint back (`style.paints = paints` / `node.fills = paints`) or the bind silently no-ops. Same trap for `setBoundVariableForEffect` and `setBoundVariableForLayoutGrid`.
+
+38. **Style variable binds go through `figma.getStyleByIdAsync`** - `figma_set_variable` accepts a `styleId` (and routes a style ID passed as `nodeId` down the same path). `TextStyle.setBoundVariable(field, variable)` takes a **Variable object only** — the string-ID form does not exist on styles at all. Bindable text fields: `fontFamily`, `fontSize`, `fontStyle`, `fontWeight`, `letterSpacing`, `lineHeight`, `paragraphSpacing`, `paragraphIndent`. `PaintStyle` binds only its color, and reads back under the key `paints` (an array), not `color`.
+
+39. **`strokeWeight` reads as `figma.mixed` when per-side weights differ** - `figma.mixed` is a Symbol, and `safeClone` turns Symbols into `null` — which would read as "no stroke weight". `readStrokeWeight(node)` returns the string `'MIXED'` instead, and the serializer then emits the four per-side weights alongside it. Per-side weights (`IndividualStrokesMixin`) exist on `RECTANGLE` plus the frame-likes (`FRAME`, `COMPONENT`, `COMPONENT_SET`, `INSTANCE`, `SLOT`, `SLIDE`) only.
+
+40. **`style.remove()` only deletes local styles** - It is sync and unrestricted, but the *fetch* must be `figma.getStyleByIdAsync`. `figma_delete_style` returns a `REMOTE_STYLE` error for library styles. Note `style.consumers` throws under dynamic-page — use `getStyleConsumersAsync()` if a consumer check is ever added.
 
 ## Running the Server
 
