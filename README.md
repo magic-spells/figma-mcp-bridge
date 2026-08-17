@@ -9,6 +9,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
 - **Full Figma API access** - Styles, variables, auto-layout, boolean operations, plus FigJam diagrams and documentation
+- **Built-in skills** - Ships its own operating guide as MCP resources (`skill://figma-bridge/SKILL.md`); connected agents are directed to read it before write-heavy work, so no separate skill install is needed
 
 ## Architecture
 

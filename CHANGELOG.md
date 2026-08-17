@@ -10,6 +10,15 @@ had not. The theme: **read the value back, and report honestly when it did not s
 
 Tool count: 93 (68 Figma design + 21 FigJam + 4 Prototype).
 
+### Built-in skills
+
+The server now ships its operating knowledge with the package: every
+`skills/<name>/SKILL.md` is served as an MCP resource
+(`skill://<name>/SKILL.md`), and the server instructions direct agents to read
+`skill://figma-bridge/SKILL.md` before write-heavy work — verification
+discipline, error-code meanings, bind-preserving sizing, mode pinning,
+concurrency rules, and auto-layout traps. No local skill install needed.
+
 ### Serializer additions
 
 `figma_get_nodes` (full depth) now returns properties that existed in the Plugin
