@@ -64,6 +64,11 @@ figma.ui.onmessage = async (msg) => {
           error: { code: code, message: msg }
         }
       });
+    } finally {
+      // Make each command its own undo step. Figma otherwise folds every
+      // uncommitted plugin edit into one step, so a single Cmd+Z in the file
+      // wiped everything the bridge had drawn since the user's last own edit.
+      if (figma.editorType !== 'dev') figma.commitUndo();
     }
   }
 };
