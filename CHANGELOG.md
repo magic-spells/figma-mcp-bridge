@@ -17,6 +17,11 @@ Connection fixes. The plugin could show "Connected" while the bridge reported
   reset the bridge to disconnected. Close and message events now count only
   from the current socket, and a replaced socket's state (and pending requests)
   is torn down when it is replaced.
+- **Plugin: one Cmd+Z undoes one command, not the whole session.** The plugin
+  never called `figma.commitUndo()`, so Figma folded every bridge edit since
+  the user's last own edit into a single undo step, and one Cmd+Z in the file
+  reverted hours of agent work across pages. Each command now commits its own
+  undo step.
 
 ## 0.4.0
 
