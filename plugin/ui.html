@@ -99,11 +99,18 @@
         return "ws://localhost:" + port;
       }
 
+      // Forget the current socket, then close it. Each socket's handlers check
+      // that it is still the current one, so a late onclose from the old
+      // socket can't null out its replacement (which dropped the handshake
+      // after a port change: the new socket opened with nothing to send on).
+      function dropSocket(reason) {
+        const old = socket;
+        socket = null;
+        if (old && old.readyState <= WebSocket.OPEN) old.close(1000, reason);
+      }
+
       function changePort() {
-        if (socket) {
-          socket.close(1000, "Port changed");
-          socket = null;
-        }
+        dropSocket("Port changed");
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
           reconnectTimer = null;
@@ -128,13 +135,18 @@
 
       function connect() {
         if (socket && socket.readyState === WebSocket.OPEN) return;
+        // A socket still connecting would otherwise live on beside the new
+        // one, and the bridge would see two connections from this plugin.
+        dropSocket("Reconnecting");
 
         setStatus("connecting", "Connecting to port " + portInput.value + "…");
 
         try {
-          socket = new WebSocket(getServerUrl());
+          const ws = new WebSocket(getServerUrl());
+          socket = ws;
 
-          socket.onopen = () => {
+          ws.onopen = () => {
+            if (socket !== ws) return;
             console.log("[UI] Connected to port " + portInput.value);
             setStatus("connected", "Connected on port " + portInput.value);
             reconnectAttempts = 0;
@@ -144,7 +156,8 @@
             );
           };
 
-          socket.onmessage = (event) => {
+          ws.onmessage = (event) => {
+            if (socket !== ws) return;
             let message;
             try {
               message = JSON.parse(event.data);
@@ -159,7 +172,7 @@
             }
 
             if (message.type === "ping") {
-              socket.send(
+              ws.send(
                 JSON.stringify({ type: "pong", timestamp: message.timestamp }),
               );
               return;
@@ -180,14 +193,15 @@
             }
           };
 
-          socket.onclose = (event) => {
+          ws.onclose = (event) => {
+            if (socket !== ws) return;
             console.log("[UI] Closed:", event.code);
             setStatus("disconnected", "Disconnected — click to reconnect");
             socket = null;
             if (event.code !== 1000) scheduleReconnect();
           };
 
-          socket.onerror = (e) => console.error("[UI] Error:", e);
+          ws.onerror = (e) => console.error("[UI] Error:", e);
         } catch (error) {
           console.error("[UI] Failed:", error);
           scheduleReconnect();

@@ -28,3 +28,6 @@ Thumbs.db
 # Build artifacts
 dist/
 build/
+
+# Playwright MCP session output
+.playwright-mcp/

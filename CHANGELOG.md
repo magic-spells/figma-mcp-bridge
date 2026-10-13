@@ -2,6 +2,22 @@
 
 All notable changes to `@magic-spells/figma-mcp-bridge` are documented here.
 
+## 0.4.1
+
+Connection fixes. The plugin could show "Connected" while the bridge reported
+`NOT_CONNECTED`, so every tool call failed.
+
+- **Plugin: a port change no longer drops the handshake.** The old socket's
+  `onclose` ran after the new socket was created and set `socket = null`, so the
+  handshake had nothing to send on. Each socket's handlers now ignore events
+  once it is no longer the current socket, and a socket that is still
+  connecting is closed before a new one opens.
+- **Bridge: a replaced connection can't wipe its replacement.** When a second
+  plugin connection replaced the first, the first socket's late `close` event
+  reset the bridge to disconnected. Close and message events now count only
+  from the current socket, and a replaced socket's state (and pending requests)
+  is torn down when it is replaced.
+
 ## 0.4.0
 
 The verification release. Every gap in this list came from real sessions where an
