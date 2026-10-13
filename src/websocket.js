@@ -56,21 +56,29 @@ export class FigmaBridge extends EventEmitter {
   _handleConnection(ws) {
     console.error('[FigmaBridge] Plugin connected');
 
-    // Replace existing connection if any
-    if (this.connection) {
+    // Replace existing connection if any. Its state is torn down here, not
+    // when its 'close' event arrives: that event lands after the new socket
+    // is current and is ignored (_handleClose), so it can't wipe the
+    // connection that replaced it.
+    const previous = this.connection;
+    if (previous) {
       console.error('[FigmaBridge] Replacing existing connection');
-      this.connection.close(1000, 'New connection');
+      this._resetConnection('Connection replaced');
+      previous.close(1000, 'New connection');
     }
 
     this.connection = ws;
     this.connectionState = 'connecting';
 
-    ws.on('message', (data) => this._handleMessage(data));
-    ws.on('close', () => this._handleClose());
+    ws.on('message', (data) => this._handleMessage(ws, data));
+    ws.on('close', () => this._handleClose(ws));
     ws.on('error', (error) => this._handleError(error));
   }
 
-  _handleMessage(data) {
+  _handleMessage(ws, data) {
+    // A replaced socket can still deliver messages; only the current one counts.
+    if (ws !== this.connection) return;
+
     let message;
     try {
       message = JSON.parse(data.toString());
@@ -86,7 +94,7 @@ export class FigmaBridge extends EventEmitter {
       console.error(`[FigmaBridge] Handshake complete: ${message.payload.fileName}`);
 
       // Send handshake acknowledgment
-      this.connection.send(JSON.stringify({
+      ws.send(JSON.stringify({
         type: 'handshake_ack',
         payload: {
           serverVersion: '0.1.0',
@@ -124,21 +132,27 @@ export class FigmaBridge extends EventEmitter {
     }
   }
 
-  _handleClose() {
+  _handleClose(ws) {
+    // A replaced socket closing says nothing about the current connection.
+    if (ws !== this.connection) return;
+
     console.error('[FigmaBridge] Connection closed');
+    this._resetConnection('Connection closed');
+    this.emit('disconnected');
+  }
+
+  _resetConnection(reason) {
     this.connectionState = 'disconnected';
     this.connection = null;
     this.documentInfo = null;
     this._stopHeartbeat();
 
-    // Reject all pending requests
-    for (const [id, pending] of this.pendingRequests) {
+    // Requests sent over this socket can never be answered now.
+    for (const pending of this.pendingRequests.values()) {
       clearTimeout(pending.timeout);
-      pending.reject(new BridgeError('CONNECTION_CLOSED', 'Connection closed'));
+      pending.reject(new BridgeError('CONNECTION_CLOSED', reason));
     }
     this.pendingRequests.clear();
-
-    this.emit('disconnected');
   }
 
   _handleError(error) {
