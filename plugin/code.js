@@ -1238,9 +1238,10 @@ async function createText(params) {
  * The server has already validated the markup and replaced currentColor, which
  * Figma cannot resolve, so this only parses, sizes and places the result.
  *
- * The SVG arrives as a FRAME the size of its viewBox. The frame is kept even
- * when flattening: it carries the icon's padding, so a set of icons shares one
- * box and lines up, where the bare glyphs would each be a different size.
+ * The SVG arrives as a FRAME at its own size (its width and height, which
+ * default to the viewBox). The frame is kept even when flattening: it carries
+ * the icon's padding, so a set of icons shares one box and lines up, where the
+ * bare glyphs would each be a different size.
  * `flatten` merges the frame's contents into one vector inside it.
  *
  * Any failure after the import removes the frame, so a failed call leaves
@@ -1297,6 +1298,8 @@ async function createSvg(params) {
     if (frame.children.length === 0) {
       warnings.push('The SVG imported as an empty frame: Figma found nothing it could draw in the markup.');
     } else if (params.flatten) {
+      var paintWarning = describeMixedPaint(frame.children);
+      if (paintWarning) warnings.push(paintWarning);
       // flatten() creates the vector on the current page unless given a parent.
       vector = figma.flatten(frame.children.slice(), frame);
     }
@@ -1338,7 +1341,7 @@ async function createSvg(params) {
 function fitSvgFrame(frame, width, height) {
   var scaleX = width !== undefined ? width / frame.width : Infinity;
   var scaleY = height !== undefined ? height / frame.height : Infinity;
-  frame.rescale(Math.min(scaleX, scaleY));
+  rescaleBy(frame, Math.min(scaleX, scaleY));
 
   if (width !== undefined && height !== undefined) {
     var offsetX = (width - frame.width) / 2;
@@ -1357,6 +1360,66 @@ function fitSvgFrame(frame, width, height) {
 
   return 'Requested ' + (width !== undefined ? width : 'auto') + '×' + (height !== undefined ? height : 'auto') +
     ', but the imported SVG is ' + frame.width + '×' + frame.height + '.';
+}
+
+/**
+ * A warning when flattening `nodes` would repaint some of their shapes. The
+ * merged vector carries one set of fills and strokes, so it only keeps the look
+ * of shapes that all share one paint: a stroked Lucide icon, a filled glyph.
+ * Two colors, a filled dot beside stroked lines, or a duotone layer at reduced
+ * opacity come out in a single paint, and the call would otherwise report
+ * success on an icon that no longer matches its SVG.
+ * @param {ReadonlyArray<SceneNode>} nodes - the shapes about to be flattened
+ * @returns {string|null}
+ */
+function describeMixedPaint(nodes) {
+  var paints = {};
+  var stack = nodes.map(function (node) { return { node: node, opacity: 1 }; });
+
+  while (stack.length > 0) {
+    var entry = stack.pop();
+    var node = entry.node;
+    // A group's opacity is lost with the group, so it counts toward its shapes'.
+    var opacity = entry.opacity * ('opacity' in node ? node.opacity : 1);
+
+    if ('children' in node) {
+      for (var i = 0; i < node.children.length; i++) {
+        stack.push({ node: node.children[i], opacity: opacity });
+      }
+      continue;
+    }
+
+    var stroked = 'strokes' in node && node.strokes.length > 0;
+    paints[JSON.stringify([
+      'fills' in node ? safeClone(node.fills) : null,
+      stroked ? safeClone(node.strokes) : null,
+      stroked ? readStrokeWeight(node) : null,
+      opacity
+    ])] = true;
+  }
+
+  var count = Object.keys(paints).length;
+  if (count <= 1) return null;
+  return 'Flattened shapes that were painted ' + count + ' different ways. The merged vector has one set of ' +
+    'fills and strokes, so it no longer looks like the SVG. Import without flatten to keep each shape\'s paint.';
+}
+
+// The smallest factor rescale() accepts, the Scale tool's own limit.
+var MIN_RESCALE_FACTOR = 0.01;
+
+/**
+ * rescale() by any positive factor. A shrink past MIN_RESCALE_FACTOR (a
+ * 2400px illustration imported at 16px) is applied as equal steps that each
+ * stay within it, instead of failing.
+ * @param {SceneNode} node - a node with rescale()
+ * @param {number} scale - the overall factor, > 0
+ */
+function rescaleBy(node, scale) {
+  var steps = Math.max(1, Math.ceil(Math.log(scale) / Math.log(MIN_RESCALE_FACTOR)));
+  var step = Math.pow(scale, 1 / steps);
+  for (var i = 0; i < steps; i++) {
+    node.rescale(step);
+  }
 }
 
 // ============================================================
