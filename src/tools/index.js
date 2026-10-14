@@ -3,9 +3,7 @@
  */
 
 import { z } from 'zod';
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { VERSION } from '../version.js';
 import { handleGetContext } from './context.js';
 import { handleListPages } from './pages.js';
 import { handleGetNodes } from './nodes.js';
@@ -124,16 +122,6 @@ import {
 } from './mutations.js';
 import { MAX_SVG_LENGTH, HEX_COLOR_PATTERN } from './svg.js';
 
-// Read package.json once at module load — used by figma_server_info to surface the running version
-const __dirname = dirname(fileURLToPath(import.meta.url));
-let pkgVersion = 'unknown';
-try {
-  const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8'));
-  pkgVersion = pkg.version;
-} catch (_) {
-  // package.json not found — fall back to 'unknown'
-}
-
 // Color schema for fill/stroke shorthand
 const colorSchema = z.union([
   z.object({
@@ -207,7 +195,7 @@ export function registerTools(server, bridge) {
       content: [{
         type: 'text',
         text: JSON.stringify({
-          version: pkgVersion,
+          version: VERSION,
           port: bridge.port,
           connected: bridge.isConnected(),
           documentInfo: bridge.getDocumentInfo()
