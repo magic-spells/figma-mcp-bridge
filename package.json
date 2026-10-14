@@ -8,7 +8,8 @@
     "figma-mcp-bridge": "src/index.js"
   },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": "node --test"
   },
   "keywords": [
     "figma",
