@@ -7,16 +7,9 @@ import { readFileSync, readdirSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { registerTools } from './tools/index.js';
+import { VERSION } from './version.js';
 
-// Read package.json once at module load so version stays in sync with the published artifact
 const __dirname = dirname(fileURLToPath(import.meta.url));
-let pkgVersion = '0.0.0';
-try {
-  const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
-  pkgVersion = pkg.version;
-} catch (_) {
-  // Fall back to placeholder if package.json can't be read
-}
 
 /**
  * Create and configure the MCP server
@@ -27,8 +20,8 @@ export function createServer(bridge) {
   const port = bridge.port;
   const server = new McpServer({
     name: 'figma-mcp-bridge',
-    version: pkgVersion,
-    instructions: `# Figma MCP Bridge v${pkgVersion}
+    version: VERSION,
+    instructions: `# Figma MCP Bridge v${VERSION}
 
 ## CONNECTION INFO — CHECK FIRST
 
@@ -42,7 +35,7 @@ Don't make the user discover the port themselves — surface it the first time y
 
 ## SKILLS — READ BEFORE WRITE-HEAVY WORK
 
-This server ships its own skills as MCP resources. **Before any session that creates or edits design content (not just single reads), read \`skill://figma-bridge/SKILL.md\`** — it covers verification discipline (readback + export-and-look), the error codes that mean "Figma forbids this", bind-preserving sizing, mode pinning, concurrency rules, and auto-layout traps. List resources to discover any additional skills shipped with this server version.
+This server ships its own skills as MCP resources. **Before any session that creates or edits design content (not just single reads), read \`skill://figma-bridge/SKILL.md\`** — it covers verification discipline (readback + export-and-look), importing icons as real SVGs instead of drawing them, the error codes that mean "Figma forbids this", bind-preserving sizing, mode pinning, concurrency rules, and auto-layout traps. List resources to discover any additional skills shipped with this server version.
 
 ## FigJam Support
 

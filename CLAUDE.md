@@ -22,18 +22,24 @@ src/
 ├── index.js           # Entry point - starts WebSocket + MCP servers
 ├── server.js          # MCP server setup (McpServer configuration)
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
+├── version.js         # The package version, read once from package.json
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (93 tools — 68 Figma + 21 FigJam + 4 Prototype)
+    ├── index.js       # Tool registration with Zod schemas (94 tools — 69 Figma + 21 FigJam + 4 Prototype)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
-    └── mutations.js   # All mutation handlers (Figma + FigJam + Prototype)
+    ├── mutations.js   # All mutation handlers (Figma + FigJam + Prototype)
+    └── svg.js         # figma_create_svg validation + currentColor substitution (pure)
 
 plugin/
 ├── manifest.json      # Figma plugin configuration
 ├── code.js            # Main plugin - Figma API command handlers
 └── ui.html            # WebSocket UI (runs in iframe)
+
+test/                  # node:test suites for the pure server-side code (npm test)
 ```
+
+The version lives in `package.json` and is read by `src/version.js`. The plugin cannot import it, so a release also bumps `pluginVersion` in the handshake in `plugin/code.js`; `npm test` fails until the two match.
 
 ## Adding New Commands
 
@@ -240,6 +246,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - `TIMEOUT` - Command exceeded 30s
 - `NODE_NOT_FOUND` - Invalid node ID
 - `INVALID_PARAMS` - Missing/invalid parameters
+- `INVALID_SVG` - `figma_create_svg` markup has no `<svg>` element, or Figma could not parse it
 - `OPERATION_FAILED` - Figma API error
 - `WRONG_EDITOR` - FigJam-only tool called outside FigJam (message names the tool + current editorType)
 - `FIGMA_DESIGN_ONLY` - Figma-Design-only tool called outside a design file
@@ -398,6 +405,21 @@ Figma has several writes that report success and change nothing. The rule for th
 49. **Node ids resolve through `resolveNodeById`, not raw `getNodeByIdAsync`** - `getNodeByIdAsync` is unreliable for the composite instance-sublayer ids Figma hands back from search and selection (`I<instanceId>;<childId>`), which is why `figma_search_nodes` always worked where `figma_get_nodes` did not. The helper tries the direct lookup, and on a null result for an id containing `';'` walks each ancestor prefix (longest first, with and without the leading `I`) and searches that subtree for an exact `node.id` match. Used by `getNodes`, `getChildren` and `reorderNode`. A genuinely missing id is reported through `describeUnresolvedId()` — `notFound` keeps its shape (array of ids) and `notFoundDetails` carries the explanation. **This is id *resolution*, not an instance-sublayer *check*** — the permission check is still `findInstanceAncestor` (constraint 42), never the `;` heuristic.
 
 50. **Compact serialization carries x/y** - `serializeNodeCompact` (used by `figma_get_children` compact and `figma_search_nodes` compact) includes `x`/`y`; `serializeNode(node, 'compact')` already had x/y/width/height. Measuring child positions is how wrap and row grouping get verified, so compact output without them was useless for geometry. Compact deliberately does **not** carry the full-mode fields (`boundVariables`, `explicitVariableModes`, `layoutWrap`, …) — that is what `depth: 'full'` is for.
+
+## SVG Import Constraints
+
+51. **`figma_create_svg` splits at the currentColor substitution** - Validation and markup rewriting happen server side in `src/tools/svg.js` (pure, covered by `npm test`); the plugin's `createSvg` only calls `figma.createNodeFromSvg()`, then sizes and places the frame. Figma cannot resolve `currentColor`, so it is replaced before the markup leaves the server: fill uses take `fillColor`, stroke uses take `strokeColor`, each falls back to the other and then `#000000`, and any other use takes the fill color. The handler adds `currentColor: { replaced, fill, stroke }` to the plugin's result through `runCommand`'s `decorate` argument, and turns colors that had nothing to replace into a warning.
+
+52. **Keep the import frame; size it like a browser** - `createNodeFromSvg` returns a FRAME at the SVG's own size (its width/height, which default to the viewBox), and it is kept even with `flatten`, because it carries the icon's padding. `figma.flatten(nodes, parent)` defaults `parent` to the current page, so the frame is passed explicitly. The flattened vector keeps one set of fills and strokes, so `describeMixedPaint` warns first when the shapes differ in fills, strokes, stroke weight or effective opacity (a group's included); otherwise the call would report success on an icon that no longer matches its SVG. Sizing uses `rescale()` (the Scale tool, so stroke weights scale as they do in a browser), through `rescaleBy`, which splits a shrink below rescale's 0.01 minimum factor into equal steps; with both width and height it fits uniformly, then `resizeWithoutConstraints` grows the frame to the box and the children are offset to center them (`xMidYMid meet`). A plain `resize()` would apply the children's constraints instead of scaling them. The parent is resolved before the import, and any throw after it calls `frame.remove()`, so a failed call leaves nothing behind.
+
+## Tests
+
+`npm test` runs `node --test` over `test/`.
+
+- `test/svg.test.js` covers the pure server-side code (SVG validation and currentColor substitution) and the handler, driven by a fake bridge.
+- `test/plugin.test.js` loads `plugin/code.js` into a `node:vm` sandbox with a fake `figma` global and drives commands through `figma.ui.onmessage`, as the UI does. The fake models only the documented plugin API behavior a command relies on, so it checks the plugin's own logic (ordering, sizing math, cleanup, response shape) but not Figma itself: a change to how the plugin calls Figma still needs a reload of the plugin in Figma. It also fails when `pluginVersion` in the handshake drifts from `package.json`.
+
+Keep shared helpers out of `test/`: Node's runner runs every `.js` file under it as a test file.
 
 ## Running the Server
 

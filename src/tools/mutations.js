@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
+import { validateSvgInput, substituteCurrentColor, withCurrentColorReport } from './svg.js';
 
 // File extension per export format, for the default output path
 const EXPORT_EXTENSIONS = { PNG: 'png', SVG: 'svg', JPG: 'jpg', PDF: 'pdf' };
@@ -4100,8 +4101,10 @@ export async function handleSetLayoutGrids(bridge, args) {
 /**
  * Standard MCP-shaped wrapper: connection guard + sendCommand + error handling.
  * Thin handlers that have no extra param validation use this directly.
+ * `decorate`, when given, receives the plugin's result and returns it with any
+ * server-side fields added before it is serialized.
  */
-async function runCommand(bridge, command, args) {
+async function runCommand(bridge, command, args, decorate) {
   if (!bridge.isConnected()) {
     return {
       content: [{
@@ -4115,8 +4118,9 @@ async function runCommand(bridge, command, args) {
   }
   try {
     const result = await bridge.sendCommand(command, args);
+    const payload = decorate ? decorate(result) : result;
     return {
-      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }]
     };
   } catch (error) {
     return {
@@ -4300,18 +4304,25 @@ export async function handleSetFlowStartingPoint(bridge, args) {
 // ============================================================
 
 /**
- * Invalid-params response in the standard MCP shape
+ * Error response in the standard MCP shape
  */
-function invalidParams(message) {
+function errorResult(code, message) {
   return {
     content: [{
       type: 'text',
       text: JSON.stringify({
-        error: { code: 'INVALID_PARAMS', message }
+        error: { code, message }
       }, null, 2)
     }],
     isError: true
   };
+}
+
+/**
+ * Invalid-params response in the standard MCP shape
+ */
+function invalidParams(message) {
+  return errorResult('INVALID_PARAMS', message);
 }
 
 /**
@@ -4420,4 +4431,33 @@ export async function handleSetVariableMode(bridge, args) {
   }
 
   return runCommand(bridge, 'set_variable_mode', args);
+}
+
+// ============================================================
+// SVG import
+// ============================================================
+
+/**
+ * Import SVG markup as nodes.
+ *
+ * Validation and the currentColor substitution run here (see ./svg.js): Figma
+ * cannot resolve currentColor, and the server is the only side that sees the
+ * original markup, so it also reports what was replaced. The plugin gets
+ * markup it can import as-is and never sees fillColor / strokeColor.
+ */
+export async function handleCreateSvg(bridge, args) {
+  const problem = validateSvgInput(args);
+  if (problem) {
+    return errorResult(problem.code, problem.message);
+  }
+
+  const { svg, fillColor, strokeColor, x, y, width, height, name, flatten, parentId } = args;
+  const substitution = substituteCurrentColor(svg, { fillColor, strokeColor });
+
+  return runCommand(
+    bridge,
+    'create_svg',
+    { svg: substitution.svg, x, y, width, height, name, flatten, parentId },
+    (result) => withCurrentColorReport(result, substitution, { fillColor, strokeColor })
+  );
 }
