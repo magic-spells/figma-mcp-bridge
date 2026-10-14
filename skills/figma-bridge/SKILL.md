@@ -44,6 +44,15 @@ where a 16:9 one belonged, a heading breaking mid-word, and a button hugging at
 
 ## Tool guidance
 
+- **Icons and logos:** import the real SVG with `figma_create_svg` (v0.5.0+):
+  read the app's `.svg` file, or the icon set's source, and pass its markup.
+  Never hand-draw glyphs from lines and ellipses; they come out unbalanced.
+  Pass the ink color as `strokeColor` / `fillColor`: Figma can't resolve
+  `currentColor`, so the bridge substitutes it and reports `currentColor` in
+  the response. Size with `width` or `height` alone so strokes scale with the
+  icon, and use `flatten: true` for one-color icons. The returned frame keeps
+  the viewBox padding; keep it, so icons share one box and align.
+  `INVALID_SVG` means the markup needs fixing. Export and look at the result.
 - **Sizing a child to its parent:** use `figma_set_layout_align: STRETCH`, not
   `figma_resize_nodes`. STRETCH preserves width/height variable binds; resize
   may destroy them (the bridge re-applies and warns, but STRETCH avoids the

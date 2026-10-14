@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 
 ## Features
 
-- **93 operations** - 68 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
+- **94 operations** - 69 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
 - **Works in both editors, plus read-only Dev Mode** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools). In Dev Mode the plugin runs read-only — see [Dev Mode support](#dev-mode-support)
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
@@ -299,6 +299,44 @@ Create a text node.
 | `fills` | color | No | | Text color |
 | `name` | string | No | `"Text"` | Node name |
 | `parentId` | string | No | | Parent node ID |
+
+#### `figma_create_svg`
+Import SVG markup as nodes, using Figma's own SVG import. **Use it for icons and logos:** import the app's real `.svg` file instead of drawing glyphs from lines and ellipses.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `svg` | string | Yes | | Complete SVG markup (the contents of an `.svg` file), at most 500,000 characters |
+| `x` | number | No | `0` | X position |
+| `y` | number | No | `0` | Y position |
+| `width` | number | No | | Width. Alone, scales proportionally; with `height`, fits the content inside the box, centered |
+| `height` | number | No | | Height. Alone, scales proportionally; with `width`, fits the content inside the box, centered |
+| `name` | string | No | `"SVG"` | Node name |
+| `flatten` | boolean | No | `false` | Merge the shapes into one `VECTOR` inside the frame (for one-color icons) |
+| `fillColor` | string | No | | Hex color (`#RGB` or `#RRGGBB`) for `fill="currentColor"` |
+| `strokeColor` | string | No | | Hex color (`#RGB` or `#RRGGBB`) for `stroke="currentColor"` |
+| `parentId` | string | No | | Parent node ID |
+
+**Returns:** `{ success, nodeId, node }`, plus `vectorId` when flattened, `currentColor: { replaced, fill, stroke }` when `currentColor` was replaced, and `warnings` when something did not go as asked.
+
+The result is a `FRAME` the size of the SVG's `viewBox`. It is kept even with `flatten`, because it holds the icon's padding: icons imported this way share one box and line up.
+
+**`currentColor`.** Icon sets such as Lucide and Heroicons draw with `stroke="currentColor"` or `fill="currentColor"`, which Figma can't resolve. The bridge replaces it before import, in attributes, `style=""` and `<style>` blocks. A stroke takes `strokeColor` and a fill takes `fillColor`; each falls back to the other, then to `#000000`, which is what a browser uses when nothing sets `color`. Any other use, such as a gradient's `stop-color`, gets the fill color. Colors passed for an SVG that never uses `currentColor` produce a warning rather than being silently ignored.
+
+**Sizing** matches a browser. One dimension rescales the content uniformly with the Scale tool, so stroke widths scale too: a 2px Lucide stroke is 1.33px at 16px. Both dimensions fit the content inside the box and center it, as `preserveAspectRatio="xMidYMid meet"` does.
+
+Markup Figma can't parse fails with `INVALID_SVG`. A `parentId` that doesn't exist fails with `NODE_NOT_FOUND` before anything is created, and any later failure removes the imported frame, so a failed call leaves nothing behind.
+
+```js
+// Lucide's "x" at 20px, in the button's text color
+figma_create_svg({
+  svg: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>',
+  name: 'icon/x',
+  width: 20,
+  strokeColor: '#1F2937',
+  flatten: true,
+  parentId: '12:34'
+})
+```
 
 #### `figma_clone_nodes`
 Clone (duplicate) nodes.

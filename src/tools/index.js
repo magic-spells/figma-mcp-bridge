@@ -488,8 +488,8 @@ export function registerTools(server, bridge) {
     'Import SVG markup as nodes, using Figma\'s own SVG import. Use it for icons, logos and illustrations: import ' +
     'the app\'s real .svg file instead of hand-drawing glyphs from lines and ellipses. The result is a FRAME the size ' +
     'of the SVG\'s viewBox holding its shapes; the frame keeps the icon\'s padding, so icons share one box and align. ' +
-    'Figma cannot resolve currentColor (e.g. Lucide\'s stroke="currentColor"), so it is replaced before import: stroke ' +
-    'uses get strokeColor, fill uses get fillColor, each falling back to the other and then to #000000, and the ' +
+    'Figma cannot resolve currentColor (e.g. Lucide\'s stroke="currentColor"), so it is replaced before import: a ' +
+    'stroke takes strokeColor and a fill takes fillColor, each falling back to the other and then to #000000, and the ' +
     'response reports what was replaced under "currentColor". width OR height alone scales proportionally, strokes ' +
     'included; both fit the content inside that box, centered, as a browser renders it. flatten: true merges the ' +
     'shapes into one VECTOR inside the frame (vectorId in the response) — use it for one-color icons. Markup Figma ' +
