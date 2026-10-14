@@ -132,6 +132,19 @@ describe('substituteCurrentColor', () => {
     assert.equal(result.replaced, 4);
   });
 
+  test('replaces the color where it is declared, so nested <g> children inherit it', () => {
+    const svg =
+      '<svg fill="none" stroke="currentColor"><g fill="currentColor" stroke="none"><circle r="1"/></g>' +
+      '<g style="fill:none;stroke:currentColor"><path d="M0 0"/></g></svg>';
+    const result = substituteCurrentColor(svg, { fillColor: '#111111', strokeColor: '#222222' });
+    assert.equal(
+      result.svg,
+      '<svg fill="none" stroke="#222222"><g fill="#111111" stroke="none"><circle r="1"/></g>' +
+      '<g style="fill:none;stroke:#222222"><path d="M0 0"/></g></svg>'
+    );
+    assert.equal(result.replaced, 3);
+  });
+
   test('other uses of currentColor take the fill color', () => {
     const svg = '<svg><linearGradient><stop stop-color="currentColor"/></linearGradient></svg>';
     const result = substituteCurrentColor(svg, { fillColor: '#111111', strokeColor: '#222222' });
