@@ -1,5 +1,6 @@
 import { WebSocketServer } from 'ws';
 import { EventEmitter } from 'events';
+import { VERSION } from './version.js';
 
 const DEFAULT_PORT = 3055;
 const REQUEST_TIMEOUT = 30000; // 30 seconds
@@ -97,7 +98,7 @@ export class FigmaBridge extends EventEmitter {
       ws.send(JSON.stringify({
         type: 'handshake_ack',
         payload: {
-          serverVersion: '0.1.0',
+          serverVersion: VERSION,
           sessionId: `sess_${Date.now()}`
         }
       }));

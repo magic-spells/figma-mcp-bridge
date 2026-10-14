@@ -3,9 +3,7 @@
  */
 
 import { z } from 'zod';
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { VERSION } from '../version.js';
 import { handleGetContext } from './context.js';
 import { handleListPages } from './pages.js';
 import { handleGetNodes } from './nodes.js';
@@ -118,18 +116,11 @@ import {
   handleSetClipsContent,
   handleDeleteStyle,
   handleSetVariableMode,
-  handleSetSizeLimits
+  handleSetSizeLimits,
+  // SVG import
+  handleCreateSvg
 } from './mutations.js';
-
-// Read package.json once at module load — used by figma_server_info to surface the running version
-const __dirname = dirname(fileURLToPath(import.meta.url));
-let pkgVersion = 'unknown';
-try {
-  const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8'));
-  pkgVersion = pkg.version;
-} catch (_) {
-  // package.json not found — fall back to 'unknown'
-}
+import { MAX_SVG_LENGTH, HEX_COLOR_PATTERN } from './svg.js';
 
 // Color schema for fill/stroke shorthand
 const colorSchema = z.union([
@@ -204,7 +195,7 @@ export function registerTools(server, bridge) {
       content: [{
         type: 'text',
         text: JSON.stringify({
-          version: pkgVersion,
+          version: VERSION,
           port: bridge.port,
           connected: bridge.isConnected(),
           documentInfo: bridge.getDocumentInfo()
@@ -489,6 +480,35 @@ export function registerTools(server, bridge) {
       parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
     },
     async (args) => handleCreateText(bridge, args)
+  );
+
+  // figma_create_svg - Import SVG markup as nodes
+  server.tool(
+    'figma_create_svg',
+    'Import SVG markup as nodes, using Figma\'s own SVG import. Use it for icons, logos and illustrations: import ' +
+    'the app\'s real .svg file instead of hand-drawing glyphs from lines and ellipses. The result is a FRAME at the ' +
+    'SVG\'s own size (its width/height, else its viewBox) holding its shapes; the frame keeps the icon\'s padding, so ' +
+    'icons share one box and align. Figma cannot resolve currentColor (e.g. Lucide\'s stroke="currentColor"), so it ' +
+    'is replaced before import: a stroke takes strokeColor and a fill takes fillColor, each falling back to the other ' +
+    'and then to #000000, and the response reports what was replaced under "currentColor". width OR height alone ' +
+    'scales proportionally, strokes included; both fit the content inside that box, centered, as a browser renders ' +
+    'it. Size the icon here: figma_resize_nodes afterwards does not scale stroke weights. flatten: true merges the ' +
+    'shapes into one VECTOR inside the frame (vectorId in the response) — use it for one-color icons drawn all in ' +
+    'strokes (like Lucide) or all in fills; it warns when the shapes are painted differently. Markup Figma cannot ' +
+    'parse fails with INVALID_SVG and leaves nothing behind.',
+    {
+      svg: z.string().max(MAX_SVG_LENGTH).describe(`Complete SVG markup: the contents of an .svg file, from <svg ...> to </svg>. At most ${MAX_SVG_LENGTH} characters.`),
+      x: z.number().optional().default(0).describe('X position'),
+      y: z.number().optional().default(0).describe('Y position'),
+      width: z.number().positive().optional().describe('Width in pixels. Alone, scales proportionally; with height, fits the content inside the box, centered. Omit both to keep the SVG\'s own size.'),
+      height: z.number().positive().optional().describe('Height in pixels. Alone, scales proportionally; with width, fits the content inside the box, centered.'),
+      name: z.string().optional().default('SVG').describe('Node name'),
+      flatten: z.boolean().optional().default(false).describe('Merge the imported shapes into a single VECTOR inside the frame, for one-color icons drawn all in strokes or all in fills. The frame keeps the viewBox bounds.'),
+      fillColor: z.string().regex(HEX_COLOR_PATTERN).optional().describe('Hex color (#RGB or #RRGGBB) for fill="currentColor". Defaults to strokeColor, then #000000.'),
+      strokeColor: z.string().regex(HEX_COLOR_PATTERN).optional().describe('Hex color (#RGB or #RRGGBB) for stroke="currentColor". Defaults to fillColor, then #000000.'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page)')
+    },
+    async (args) => handleCreateSvg(bridge, args)
   );
 
   // ============================================================

@@ -28,7 +28,7 @@ figma.ui.onmessage = async (msg) => {
     figma.ui.postMessage({
       type: 'handshake_info',
       payload: {
-        pluginVersion: '0.4.1',
+        pluginVersion: '0.5.0',
         protocolVersion: '1',
         fileId: figma.fileKey || 'unknown',
         fileName: figma.root.name,
@@ -64,6 +64,11 @@ figma.ui.onmessage = async (msg) => {
           error: { code: code, message: msg }
         }
       });
+    } finally {
+      // Make each command its own undo step. Figma otherwise folds every
+      // uncommitted plugin edit into one step, so a single Cmd+Z in the file
+      // wiped everything the bridge had drawn since the user's last own edit.
+      if (figma.editorType !== 'dev') figma.commitUndo();
     }
   }
 };
@@ -121,6 +126,8 @@ async function handleCommand(command, payload) {
       return await createFrame(payload);
     case 'create_text':
       return await createText(payload);
+    case 'create_svg':
+      return await createSvg(payload);
     case 'set_selection':
       return await setSelection(payload);
     case 'set_current_page':
@@ -1220,6 +1227,199 @@ async function createText(params) {
     success: true,
     node: serializeNode(textNode, 'full')
   };
+}
+
+// ============================================================
+// SVG Import
+// ============================================================
+
+/**
+ * Import SVG markup with figma.createNodeFromSvg(), the editor's own SVG import.
+ * The server has already validated the markup and replaced currentColor, which
+ * Figma cannot resolve, so this only parses, sizes and places the result.
+ *
+ * The SVG arrives as a FRAME at its own size (its width and height, which
+ * default to the viewBox). The frame is kept even when flattening: it carries
+ * the icon's padding, so a set of icons shares one box and lines up, where the
+ * bare glyphs would each be a different size.
+ * `flatten` merges the frame's contents into one vector inside it.
+ *
+ * Any failure after the import removes the frame, so a failed call leaves
+ * nothing behind.
+ *
+ * @param {Object} params - { svg, x, y, width, height, name, flatten, parentId }
+ */
+async function createSvg(params) {
+  var x = params.x !== undefined ? params.x : 0;
+  var y = params.y !== undefined ? params.y : 0;
+  var width = params.width;
+  var height = params.height;
+
+  // Resolve the parent first, so a bad id fails before anything is created.
+  var parent = figma.currentPage;
+  if (params.parentId) {
+    parent = await resolveNodeById(params.parentId);
+    if (!parent) {
+      var notFound = new Error(describeUnresolvedId(params.parentId));
+      notFound.code = 'NODE_NOT_FOUND';
+      throw notFound;
+    }
+    if (!('appendChild' in parent)) {
+      var notContainer = new Error(
+        'Parent ' + params.parentId + ' (' + parent.type + ') cannot contain other nodes. ' +
+        'Pass a page, frame, group, section or component as parentId.'
+      );
+      notContainer.code = 'INVALID_PARAMS';
+      throw notContainer;
+    }
+    // dynamic-page: appendChild on a PageNode needs the page loaded first
+    if (parent.type === 'PAGE' && typeof parent.loadAsync === 'function') {
+      await parent.loadAsync();
+    }
+  }
+
+  var frame;
+  try {
+    frame = figma.createNodeFromSvg(params.svg);
+  } catch (e) {
+    var invalid = new Error(
+      'Figma could not import the SVG: ' + ((e && e.message) || String(e)) + '. ' +
+      'Pass the complete markup of an .svg file, a single <svg> root through its closing </svg>.'
+    );
+    invalid.code = 'INVALID_SVG';
+    throw invalid;
+  }
+
+  var vector = null;
+  var warnings = [];
+  try {
+    if (params.name) frame.name = params.name;
+
+    if (frame.children.length === 0) {
+      warnings.push('The SVG imported as an empty frame: Figma found nothing it could draw in the markup.');
+    } else if (params.flatten) {
+      var paintWarning = describeMixedPaint(frame.children);
+      if (paintWarning) warnings.push(paintWarning);
+      // flatten() creates the vector on the current page unless given a parent.
+      vector = figma.flatten(frame.children.slice(), frame);
+    }
+
+    if (width !== undefined || height !== undefined) {
+      var sizeWarning = fitSvgFrame(frame, width, height);
+      if (sizeWarning) warnings.push(sizeWarning);
+    }
+
+    frame.x = x;
+    frame.y = y;
+    parent.appendChild(frame);
+  } catch (e) {
+    frame.remove();
+    throw e;
+  }
+
+  var result = {
+    success: true,
+    nodeId: frame.id,
+    node: serializeNode(frame, 'full')
+  };
+  if (vector) result.vectorId = vector.id;
+  if (warnings.length > 0) result.warnings = warnings;
+  return result;
+}
+
+/**
+ * Size an imported SVG frame the way a browser sizes <svg width height viewBox>.
+ * One dimension scales the content uniformly to it. Both scale it uniformly to
+ * fit inside that box and center it there (preserveAspectRatio's default,
+ * xMidYMid meet). rescale() is the Scale tool, so stroke weights scale with the
+ * shapes, as they do in a browser.
+ * @param {FrameNode} frame - the frame createNodeFromSvg returned
+ * @param {number|undefined} width - requested width, or undefined
+ * @param {number|undefined} height - requested height, or undefined
+ * @returns {string|null} a warning if the frame did not end up at the requested size
+ */
+function fitSvgFrame(frame, width, height) {
+  var scaleX = width !== undefined ? width / frame.width : Infinity;
+  var scaleY = height !== undefined ? height / frame.height : Infinity;
+  rescaleBy(frame, Math.min(scaleX, scaleY));
+
+  if (width !== undefined && height !== undefined) {
+    var offsetX = (width - frame.width) / 2;
+    var offsetY = (height - frame.height) / 2;
+    frame.resizeWithoutConstraints(width, height);
+    var children = frame.children;
+    for (var i = 0; i < children.length; i++) {
+      children[i].x += offsetX;
+      children[i].y += offsetY;
+    }
+  }
+
+  var widthOk = width === undefined || Math.abs(frame.width - width) <= SIZE_EPSILON;
+  var heightOk = height === undefined || Math.abs(frame.height - height) <= SIZE_EPSILON;
+  if (widthOk && heightOk) return null;
+
+  return 'Requested ' + (width !== undefined ? width : 'auto') + '×' + (height !== undefined ? height : 'auto') +
+    ', but the imported SVG is ' + frame.width + '×' + frame.height + '.';
+}
+
+/**
+ * A warning when flattening `nodes` would repaint some of their shapes. The
+ * merged vector carries one set of fills and strokes, so it only keeps the look
+ * of shapes that all share one paint: a stroked Lucide icon, a filled glyph.
+ * Two colors, a filled dot beside stroked lines, or a duotone layer at reduced
+ * opacity come out in a single paint, and the call would otherwise report
+ * success on an icon that no longer matches its SVG.
+ * @param {ReadonlyArray<SceneNode>} nodes - the shapes about to be flattened
+ * @returns {string|null}
+ */
+function describeMixedPaint(nodes) {
+  var paints = {};
+  var stack = nodes.map(function (node) { return { node: node, opacity: 1 }; });
+
+  while (stack.length > 0) {
+    var entry = stack.pop();
+    var node = entry.node;
+    // A group's opacity is lost with the group, so it counts toward its shapes'.
+    var opacity = entry.opacity * ('opacity' in node ? node.opacity : 1);
+
+    if ('children' in node) {
+      for (var i = 0; i < node.children.length; i++) {
+        stack.push({ node: node.children[i], opacity: opacity });
+      }
+      continue;
+    }
+
+    var stroked = 'strokes' in node && node.strokes.length > 0;
+    paints[JSON.stringify([
+      'fills' in node ? safeClone(node.fills) : null,
+      stroked ? safeClone(node.strokes) : null,
+      stroked ? readStrokeWeight(node) : null,
+      opacity
+    ])] = true;
+  }
+
+  var count = Object.keys(paints).length;
+  if (count <= 1) return null;
+  return 'Flattened shapes that were painted ' + count + ' different ways. The merged vector has one set of ' +
+    'fills and strokes, so it no longer looks like the SVG. Import without flatten to keep each shape\'s paint.';
+}
+
+// The smallest factor rescale() accepts, the Scale tool's own limit.
+var MIN_RESCALE_FACTOR = 0.01;
+
+/**
+ * rescale() by any positive factor. A shrink past MIN_RESCALE_FACTOR (a
+ * 2400px illustration imported at 16px) is applied as equal steps that each
+ * stay within it, instead of failing.
+ * @param {SceneNode} node - a node with rescale()
+ * @param {number} scale - the overall factor, > 0
+ */
+function rescaleBy(node, scale) {
+  var steps = Math.max(1, Math.ceil(Math.log(scale) / Math.log(MIN_RESCALE_FACTOR)));
+  var step = Math.pow(scale, 1 / steps);
+  for (var i = 0; i < steps; i++) {
+    node.rescale(step);
+  }
 }
 
 // ============================================================
