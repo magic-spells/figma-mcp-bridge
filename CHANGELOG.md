@@ -2,6 +2,41 @@
 
 All notable changes to `@magic-spells/figma-mcp-bridge` are documented here.
 
+## 0.5.0
+
+SVG import. Agents could only build icons from lines, ellipses and rectangles,
+and the results looked rough. They can now import the real SVG.
+
+Tool count: 94 (69 Figma design + 21 FigJam + 4 Prototype).
+
+### New tools
+
+- **`figma_create_svg`** imports SVG markup with Figma's own SVG import
+  (`figma.createNodeFromSvg`). The result is a frame the size of the SVG's
+  `viewBox`, so imported icons keep their padding and share one box.
+  - **`currentColor` is substituted.** Figma can't resolve it, and icon sets such
+    as Lucide and Heroicons draw with it. A stroke takes `strokeColor` and a
+    fill takes `fillColor`; each falls back to the other, then to `#000000`.
+    The response reports what was replaced, and colors passed for an SVG
+    without `currentColor` come back as a warning.
+  - **Sizing matches a browser.** `width` or `height` alone rescales
+    proportionally, stroke widths included; both fit the content inside the
+    box, centered.
+  - **`flatten: true`** merges the shapes into one vector inside the frame, for
+    one-color icons.
+  - **Failures leave nothing behind.** Markup Figma can't parse returns
+    `INVALID_SVG`, a missing parent fails before the import, and any later
+    failure removes the imported frame.
+
+### Other changes
+
+- **The plugin handshake reports the real server version.** It said `0.1.0`
+  in every release. The version is now read from `package.json` in one place
+  (`src/version.js`) and shared by the MCP server info, `figma_server_info` and
+  the handshake.
+- **`npm test`** runs a `node:test` suite covering the server-side half of SVG
+  import.
+
 ## 0.4.1
 
 Connection fixes. The plugin could show "Connected" while the bridge reported

@@ -28,7 +28,7 @@ figma.ui.onmessage = async (msg) => {
     figma.ui.postMessage({
       type: 'handshake_info',
       payload: {
-        pluginVersion: '0.4.1',
+        pluginVersion: '0.5.0',
         protocolVersion: '1',
         fileId: figma.fileKey || 'unknown',
         fileName: figma.root.name,
