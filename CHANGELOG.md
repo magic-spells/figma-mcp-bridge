@@ -12,8 +12,8 @@ Tool count: 94 (69 Figma design + 21 FigJam + 4 Prototype).
 ### New tools
 
 - **`figma_create_svg`** imports SVG markup with Figma's own SVG import
-  (`figma.createNodeFromSvg`). The result is a frame the size of the SVG's
-  `viewBox`, so imported icons keep their padding and share one box.
+  (`figma.createNodeFromSvg`). The result is a frame at the SVG's own size,
+  so imported icons keep their padding and share one box.
   - **`currentColor` is substituted.** Figma can't resolve it, and icon sets such
     as Lucide and Heroicons draw with it. A stroke takes `strokeColor` and a
     fill takes `fillColor`; each falls back to the other, then to `#000000`.
@@ -21,9 +21,11 @@ Tool count: 94 (69 Figma design + 21 FigJam + 4 Prototype).
     without `currentColor` come back as a warning.
   - **Sizing matches a browser.** `width` or `height` alone rescales
     proportionally, stroke widths included; both fit the content inside the
-    box, centered.
+    box, centered. A large illustration can be shrunk to icon size, past the
+    0.01 limit of Figma's Scale tool.
   - **`flatten: true`** merges the shapes into one vector inside the frame, for
-    one-color icons.
+    one-color icons drawn all in strokes or all in fills. Flattening shapes
+    painted differently comes back with a warning.
   - **Failures leave nothing behind.** Markup Figma can't parse returns
     `INVALID_SVG`, a missing parent fails before the import, and any later
     failure removes the imported frame.
@@ -34,8 +36,10 @@ Tool count: 94 (69 Figma design + 21 FigJam + 4 Prototype).
   in every release. The version is now read from `package.json` in one place
   (`src/version.js`) and shared by the MCP server info, `figma_server_info` and
   the handshake.
-- **`npm test`** runs a `node:test` suite covering the server-side half of SVG
-  import.
+- **`npm test`** runs a `node:test` suite. It covers both halves of SVG
+  import: the server side directly, and the plugin side by running
+  `plugin/code.js` against a fake `figma` API. It also fails when the plugin's
+  handshake version drifts from `package.json`.
 
 ## 0.4.1
 

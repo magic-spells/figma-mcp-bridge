@@ -39,7 +39,7 @@ plugin/
 test/                  # node:test suites for the pure server-side code (npm test)
 ```
 
-The version lives in `package.json` and is read by `src/version.js`. The plugin cannot import it, so a release also bumps `pluginVersion` in the handshake in `plugin/code.js`.
+The version lives in `package.json` and is read by `src/version.js`. The plugin cannot import it, so a release also bumps `pluginVersion` in the handshake in `plugin/code.js`; `npm test` fails until the two match.
 
 ## Adding New Commands
 
@@ -410,11 +410,16 @@ Figma has several writes that report success and change nothing. The rule for th
 
 51. **`figma_create_svg` splits at the currentColor substitution** - Validation and markup rewriting happen server side in `src/tools/svg.js` (pure, covered by `npm test`); the plugin's `createSvg` only calls `figma.createNodeFromSvg()`, then sizes and places the frame. Figma cannot resolve `currentColor`, so it is replaced before the markup leaves the server: fill uses take `fillColor`, stroke uses take `strokeColor`, each falls back to the other and then `#000000`, and any other use takes the fill color. The handler adds `currentColor: { replaced, fill, stroke }` to the plugin's result through `runCommand`'s `decorate` argument, and turns colors that had nothing to replace into a warning.
 
-52. **Keep the import frame; size it like a browser** - `createNodeFromSvg` returns a FRAME the size of the viewBox, and it is kept even with `flatten`, because it carries the icon's padding. `figma.flatten(nodes, parent)` defaults `parent` to the current page, so the frame is passed explicitly. Sizing uses `rescale()` (the Scale tool, so stroke weights scale as they do in a browser); with both width and height it fits uniformly, then `resizeWithoutConstraints` grows the frame to the box and the children are offset to center them (`xMidYMid meet`). A plain `resize()` would apply the children's constraints instead of scaling them. The parent is resolved before the import, and any throw after it calls `frame.remove()`, so a failed call leaves nothing behind.
+52. **Keep the import frame; size it like a browser** - `createNodeFromSvg` returns a FRAME at the SVG's own size (its width/height, which default to the viewBox), and it is kept even with `flatten`, because it carries the icon's padding. `figma.flatten(nodes, parent)` defaults `parent` to the current page, so the frame is passed explicitly. The flattened vector keeps one set of fills and strokes, so `describeMixedPaint` warns first when the shapes differ in fills, strokes, stroke weight or effective opacity (a group's included); otherwise the call would report success on an icon that no longer matches its SVG. Sizing uses `rescale()` (the Scale tool, so stroke weights scale as they do in a browser), through `rescaleBy`, which splits a shrink below rescale's 0.01 minimum factor into equal steps; with both width and height it fits uniformly, then `resizeWithoutConstraints` grows the frame to the box and the children are offset to center them (`xMidYMid meet`). A plain `resize()` would apply the children's constraints instead of scaling them. The parent is resolved before the import, and any throw after it calls `frame.remove()`, so a failed call leaves nothing behind.
 
 ## Tests
 
-`npm test` runs `node --test` over `test/`. It covers the pure server-side code (SVG validation and currentColor substitution) and a handler driven by a fake bridge. Plugin code runs only inside Figma, so it is checked by reloading the plugin.
+`npm test` runs `node --test` over `test/`.
+
+- `test/svg.test.js` covers the pure server-side code (SVG validation and currentColor substitution) and the handler, driven by a fake bridge.
+- `test/plugin.test.js` loads `plugin/code.js` into a `node:vm` sandbox with a fake `figma` global and drives commands through `figma.ui.onmessage`, as the UI does. The fake models only the documented plugin API behavior a command relies on, so it checks the plugin's own logic (ordering, sizing math, cleanup, response shape) but not Figma itself: a change to how the plugin calls Figma still needs a reload of the plugin in Figma. It also fails when `pluginVersion` in the handshake drifts from `package.json`.
+
+Keep shared helpers out of `test/`: Node's runner runs every `.js` file under it as a test file.
 
 ## Running the Server
 

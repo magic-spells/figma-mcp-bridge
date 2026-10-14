@@ -311,18 +311,18 @@ Import SVG markup as nodes, using Figma's own SVG import. **Use it for icons and
 | `width` | number | No | | Width. Alone, scales proportionally; with `height`, fits the content inside the box, centered |
 | `height` | number | No | | Height. Alone, scales proportionally; with `width`, fits the content inside the box, centered |
 | `name` | string | No | `"SVG"` | Node name |
-| `flatten` | boolean | No | `false` | Merge the shapes into one `VECTOR` inside the frame (for one-color icons) |
+| `flatten` | boolean | No | `false` | Merge the shapes into one `VECTOR` inside the frame (for one-color icons drawn all in strokes or all in fills) |
 | `fillColor` | string | No | | Hex color (`#RGB` or `#RRGGBB`) for `fill="currentColor"` |
 | `strokeColor` | string | No | | Hex color (`#RGB` or `#RRGGBB`) for `stroke="currentColor"` |
 | `parentId` | string | No | | Parent node ID |
 
 **Returns:** `{ success, nodeId, node }`, plus `vectorId` when flattened, `currentColor: { replaced, fill, stroke }` when `currentColor` was replaced, and `warnings` when something did not go as asked.
 
-The result is a `FRAME` the size of the SVG's `viewBox`. It is kept even with `flatten`, because it holds the icon's padding: icons imported this way share one box and line up.
+The result is a `FRAME` at the SVG's own size: its `width` and `height`, which default to its `viewBox`. It is kept even with `flatten`, because it holds the icon's padding: icons imported this way share one box and line up. `flatten` suits icons whose shapes are all stroked (like Lucide) or all filled, because the merged vector carries one set of fills and strokes; flattening shapes painted differently comes back with a warning.
 
 **`currentColor`.** Icon sets such as Lucide and Heroicons draw with `stroke="currentColor"` or `fill="currentColor"`, which Figma can't resolve. The bridge replaces it before import, in attributes, `style=""` and `<style>` blocks. A stroke takes `strokeColor` and a fill takes `fillColor`; each falls back to the other, then to `#000000`, which is what a browser uses when nothing sets `color`. Any other use, such as a gradient's `stop-color`, gets the fill color. Colors passed for an SVG that never uses `currentColor` produce a warning rather than being silently ignored.
 
-**Sizing** matches a browser. One dimension rescales the content uniformly with the Scale tool, so stroke widths scale too: a 2px Lucide stroke is 1.33px at 16px. Both dimensions fit the content inside the box and center it, as `preserveAspectRatio="xMidYMid meet"` does.
+**Sizing** matches a browser. One dimension rescales the content uniformly with the Scale tool, so stroke widths scale too: a 2px Lucide stroke is 1.33px at 16px. Both dimensions fit the content inside the box and center it, as `preserveAspectRatio="xMidYMid meet"` does. Size the icon here rather than with `figma_resize_nodes` afterwards, which leaves stroke weights as they are.
 
 Markup Figma can't parse fails with `INVALID_SVG`. A `parentId` that doesn't exist fails with `NODE_NOT_FOUND` before anything is created, and any later failure removes the imported frame, so a failed call leaves nothing behind.
 
