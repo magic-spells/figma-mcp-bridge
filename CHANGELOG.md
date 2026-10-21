@@ -2,7 +2,7 @@
 
 All notable changes to `@magic-spells/figma-mcp-bridge` are documented here.
 
-## 0.6.1 (unreleased)
+## 0.6.1
 
 Fixes from the first real run of the 0.6.0 library tools.
 
