@@ -8,7 +8,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 - **Works in both editors, plus read-only Dev Mode** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools). In Dev Mode the plugin runs read-only — see [Dev Mode support](#dev-mode-support)
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
-- **Full Figma API access** - Styles, variables, auto-layout, boolean operations, plus FigJam diagrams and documentation
+- **Full Figma API access** - Styles, variables, auto-layout, components and team libraries, plus FigJam diagrams and documentation
 - **Built-in skills** - Ships its own operating guide as MCP resources (`skill://figma-bridge/SKILL.md`); connected agents are directed to read it before write-heavy work, so no separate skill install is needed
 
 ## Architecture
@@ -401,13 +401,14 @@ Set fill color on a node.
 - Full array: `[{ type: "SOLID", color: { r, g, b }, opacity: 1 }]`
 
 #### `figma_set_strokes`
-Set stroke color on a node.
+Set stroke color and/or weight on a node. Omit `strokes` to change weights only.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `nodeId` | string | Yes | Node to modify |
-| `strokes` | color | Yes | Stroke color |
-| `strokeWeight` | number | No | Stroke weight in pixels |
+| `strokes` | color | No | Stroke color (omit to leave existing colors untouched) |
+| `strokeWeight` | number | No | Uniform stroke weight in pixels (applied before any per-side weights) |
+| `strokeTopWeight` / `strokeRightWeight` / `strokeBottomWeight` / `strokeLeftWeight` | number | No | Per-side weights in pixels. `RECTANGLE` and frame-like nodes only (`FRAME`, `COMPONENT`, `COMPONENT_SET`, `INSTANCE`, `SLOT`, `SLIDE`) |
 
 #### `figma_set_text`
 Set text content on a text node.
@@ -499,8 +500,9 @@ Set variable value or bind to node property.
 | `variableId` | string | Yes | Variable ID |
 | `modeId` | string | No | Mode ID (for setting value) |
 | `value` | any | No | Value to set |
-| `nodeId` | string | No | Node ID (for binding) |
-| `field` | string | No | Field to bind (`opacity`, `cornerRadius`, `fills`, etc.) |
+| `nodeId` | string | No | Node ID (for binding). A style ID here is routed to the style path |
+| `styleId` | string | No | Local style ID to bind instead of a node (TEXT or PAINT styles) |
+| `field` | string | No | Field to bind (`opacity`, `cornerRadius`, `fills`, etc.; text styles: `fontSize`, `lineHeight`, `fontFamily`, …; paint styles: `paints`) |
 | `paintIndex` | number | No | Paint array index for fills/strokes (default 0) |
 
 #### `figma_set_text_style`
@@ -1320,6 +1322,7 @@ Set the rotation of one or more nodes.
 |-----------|------|----------|-------------|
 | `nodeIds` | string[] | Yes | Array of node IDs to rotate |
 | `rotation` | number | Yes | Rotation in degrees (-180 to 180) |
+| `pivot` | string | No | `center` (default) keeps the visual center in place; `top-left` is Figma's raw `node.rotation` behavior. Non-absolute auto-layout children always rotate about the top-left, with a warning |
 
 ---
 
@@ -1347,6 +1350,7 @@ figma_search_variables({
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `namePattern` | string | | Wildcard pattern (`*` = any chars) |
+| `nameContains` | string | | Case-insensitive substring match |
 | `type` | string | `"ALL"` | Variable type filter |
 | `collectionName` | string | | Collection name filter |
 | `compact` | boolean | `true` | Minimal data (id, name, value only) |
@@ -1397,10 +1401,8 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 ## Known Limitations
 
 - **No ES6 spread operator** in plugin code
-- **Boolean operations** require nodes with same parent
 - **Constraints** don't work on auto-layout children (use `layoutAlign`)
 - **Lines** have height=0, use `length` parameter
-- **Vectors** only support M, L, Q, C, Z commands (no arcs)
 - **`detachInstance()`** also detaches ancestor instances
 - **Instance sublayers** can't be resized, size-bound, or reordered — Figma blocks these, and the bridge returns `INSTANCE_SUBLAYER_RESTRICTED` rather than a false success. Act on the component master, or use `figma_set_layout_align: STRETCH`
 - **30-second timeout** on all commands

@@ -37,7 +37,14 @@ plugin/
 ├── code.js            # Main plugin - Figma API command handlers
 └── ui.html            # WebSocket UI (runs in iframe)
 
-test/                  # node:test suites for the pure server-side code (npm test)
+skills/
+└── figma-bridge/
+    └── SKILL.md       # Operating guide, served as the MCP resource skill://figma-bridge/SKILL.md
+
+test/                  # node:test suites (npm test)
+├── svg.test.js        # SVG validation, currentColor substitution, handleCreateSvg
+├── library.test.js    # components.js checks, library/instance handlers, Zod schemas, tool count
+└── plugin.test.js     # plugin/code.js in a node:vm sandbox with a fake figma global
 ```
 
 The version lives in `package.json` and is read by `src/version.js`. The plugin cannot import it, so a release also bumps `pluginVersion` in the handshake in `plugin/code.js`; `npm test` fails until the two match.
@@ -245,7 +252,21 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 ### BridgeError Codes
 - `NOT_CONNECTED` - Plugin not connected
 - `TIMEOUT` - Command exceeded 30s
+- `CONNECTION_CLOSED` - The plugin disconnected while a command was pending
+- `UNKNOWN_ERROR` - Server-side fallback when an error carries no code
 - `NODE_NOT_FOUND` - Invalid node ID
+- `PAGE_NOT_FOUND` / `NOT_A_PAGE` - The page id is missing / is not a page
+- `PARENT_NOT_FOUND` / `INVALID_PARENT` - `figma_reparent_nodes` target is missing / cannot have children
+- `CANNOT_DELETE_LAST_PAGE` - `figma_delete_page` on the only page
+- `COLLECTION_NOT_FOUND` / `MODE_NOT_FOUND` - Variable collection or mode id does not exist
+- `CANNOT_DELETE_LAST_MODE` - `figma_delete_mode` on a collection's only mode
+- `PAINT_NOT_FOUND` - `figma_unbind_variable` paint index out of range
+- `STYLE_NOT_FOUND` / `REMOTE_STYLE` - `figma_delete_style`: no such style / it is a library style
+- `INSTANCE_NOT_FOUND` / `COMPONENT_NOT_FOUND` - `figma_swap_instance` ids do not resolve
+- `INVALID_NODE_TYPE` - `figma_combine_as_variants` given a node that is not a component
+- `INVALID_MAGNET` - Connector magnet not allowed for the line type (STRAIGHT takes CENTER/NONE only)
+- `SET_FAILED` - Per-node entry in `figma_set_size_limits` `errors` when a write throws
+- `NOT_SUPPORTED` - Node type lacks layout grids (`setLayoutGrids`, whose tool is disabled)
 - `INVALID_PARAMS` - Missing/invalid parameters
 - `INVALID_SVG` - `figma_create_svg` markup has no `<svg>` element, or Figma could not parse it
 - `OPERATION_FAILED` - Figma API error
