@@ -62,9 +62,25 @@ class FakeContainer extends FakeNode {
     node.parent = this;
   }
 
+  insertChild(index, node) {
+    if (node.parent) node.parent.detach(node);
+    this.children.splice(index, 0, node);
+    node.parent = this;
+  }
+
   detach(node) {
     this.children.splice(this.children.indexOf(node), 1);
     node.parent = null;
+  }
+
+  // Depth-first, in layer order, as Figma's findAll walks.
+  findAll(predicate) {
+    const found = [];
+    for (const child of this.children) {
+      if (predicate(child)) found.push(child);
+      if (child.findAll) found.push(...child.findAll(predicate));
+    }
+    return found;
   }
 }
 
@@ -114,14 +130,140 @@ class FakePage extends FakeContainer {
   }
 }
 
+class FakeText extends FakeNode {
+  constructor({ characters = '', textStyleId = '', ...props } = {}) {
+    super('TEXT', props);
+    this.characters = characters;
+    this.textStyleId = textStyleId;
+  }
+}
+
+/**
+ * A component; a variant when it sits in a FakeComponentSet. As in Figma, a
+ * variant has variantProperties and reading its componentPropertyDefinitions
+ * throws (the set holds them).
+ */
+class FakeComponent extends FakeContainer {
+  constructor({ key, remote = true, variantProperties = null, definitions = {}, ...props } = {}) {
+    super('COMPONENT', { width: 80, height: 32, ...props });
+    this.key = key;
+    this.remote = remote;
+    this.variantProperties = variantProperties;
+    this.ownDefinitions = definitions;
+  }
+
+  get componentPropertyDefinitions() {
+    if (this.parent && this.parent.type === 'COMPONENT_SET') {
+      throw new Error('Can only get component property definitions of a component set or non-variant component');
+    }
+    return this.ownDefinitions;
+  }
+
+  createInstance() {
+    return new FakeInstance(this);
+  }
+}
+
+class FakeComponentSet extends FakeContainer {
+  constructor({ key, remote = true, definitions, ...props }) {
+    super('COMPONENT_SET', props);
+    this.key = key;
+    this.remote = remote;
+    this.componentPropertyDefinitions = definitions;
+  }
+
+  get defaultVariant() {
+    return this.children[0];
+  }
+}
+
+/**
+ * An instance of `main`. setProperties switches variants by matching the
+ * merged variant values to a sibling variant, and stores the other values as
+ * overrides; componentProperties reads them back. `ignore` names properties
+ * setProperties silently drops, to model a write that does not land.
+ */
 class FakeInstance extends FakeContainer {
-  constructor() {
-    super('INSTANCE', { width: 100, height: 40 });
+  constructor(main = null, { ignore = [] } = {}) {
+    super('INSTANCE', { name: main ? main.name : 'INSTANCE', width: main ? main.width : 100, height: main ? main.height : 40 });
+    this.main = main;
+    this.overrides = {};
+    this.ignore = ignore;
   }
 
   appendChild() {
     throw new Error('Cannot move node. New parent is an instance or is inside of an instance');
   }
+
+  async getMainComponentAsync() {
+    return this.main;
+  }
+
+  definitions() {
+    const set = this.main.parent && this.main.parent.type === 'COMPONENT_SET' ? this.main.parent : null;
+    return set ? set.componentPropertyDefinitions : this.main.componentPropertyDefinitions;
+  }
+
+  get componentProperties() {
+    const result = {};
+    for (const [name, def] of Object.entries(this.definitions())) {
+      const value = def.type === 'VARIANT'
+        ? this.main.variantProperties[name]
+        : (name in this.overrides ? this.overrides[name] : def.defaultValue);
+      result[name] = { type: def.type, value };
+    }
+    return result;
+  }
+
+  setProperties(properties) {
+    const definitions = this.definitions();
+    const variantValues = { ...(this.main.variantProperties || {}) };
+    for (const [name, value] of Object.entries(properties)) {
+      if (!(name in definitions)) throw new Error(`Could not find a component property with name: '${name}'`);
+      if (this.ignore.includes(name)) continue;
+      if (definitions[name].type === 'VARIANT') variantValues[name] = value;
+      else this.overrides[name] = value;
+    }
+    if (this.main.variantProperties) {
+      const set = this.main.parent;
+      const match = set.children.find((variant) =>
+        Object.entries(variantValues).every(([name, value]) => variant.variantProperties[name] === value));
+      if (!match) throw new Error('No variant matches ' + JSON.stringify(variantValues));
+      this.main = match;
+      this.width = match.width;
+      this.height = match.height;
+    }
+  }
+
+  resize(width, height) {
+    this.width = width;
+    this.height = height;
+  }
+}
+
+const BUTTON_DEFINITIONS = {
+  Variant: { type: 'VARIANT', defaultValue: 'Primary', variantOptions: ['Primary', 'Secondary'] },
+  Size: { type: 'VARIANT', defaultValue: 'default', variantOptions: ['default', 'sm'] },
+  'Label#12:0': { type: 'TEXT', defaultValue: 'Button' },
+  'Show icon#3:1': { type: 'BOOLEAN', defaultValue: false },
+  'Icon#4:2': { type: 'INSTANCE_SWAP', defaultValue: '9:1' }
+};
+
+/** A published Button set: Variant × Size, with label, icon toggle and icon swap. */
+function buttonSet() {
+  const variants = [];
+  for (const variant of ['Primary', 'Secondary']) {
+    for (const size of ['default', 'sm']) {
+      variants.push(new FakeComponent({
+        name: `Variant=${variant}, Size=${size}`,
+        key: `key-${variant}-${size}`,
+        variantProperties: { Variant: variant, Size: size },
+        width: size === 'sm' ? 64 : 80,
+        height: size === 'sm' ? 28 : 36
+      }));
+    }
+  }
+  return new FakeComponentSet({ name: 'Button', key: 'key-button-set', definitions: BUTTON_DEFINITIONS, children: variants });
 }
 
 /** A frame as createNodeFromSvg returns it: the SVG's size, its shapes inside. */
@@ -147,10 +289,23 @@ const LUCIDE_X_SHAPES = [
  * A fake `figma` global. `importSvg(svg)` stands in for the parser: it returns
  * the frame the import should produce, or throws as Figma does for bad markup.
  */
-function fakeFigma({ importSvg = () => svgFrame(), pages = [] } = {}) {
+function fakeFigma({ importSvg = () => svgFrame(), pages = [], library = {} } = {}) {
   const currentPage = new FakePage('Page 1');
   const root = new FakeContainer('DOCUMENT', { name: 'Test file', children: [currentPage, ...pages] });
   const posted = [];
+  // Team library: published nodes by key. An import makes the node reachable
+  // by id, as Figma's import adds the remote node to the file.
+  const componentSets = library.componentSets || {};
+  const components = library.components || {};
+  const styles = library.styles || {};
+  const imported = [];
+  const importFrom = (registry, key, what) => {
+    figma.libraryImports.push(key);
+    const node = registry[key];
+    if (!node) return Promise.reject(new Error(`Failed to import ${what} by key "${key}"`));
+    imported.push(node);
+    return Promise.resolve(node);
+  };
 
   const figma = {
     editorType: 'figma',
@@ -172,8 +327,15 @@ function fakeFigma({ importSvg = () => svgFrame(), pages = [] } = {}) {
     commitUndo() {
       figma.undoCommits++;
     },
+    libraryImports: [],
+    importComponentSetByKeyAsync: (key) => importFrom(componentSets, key, 'component set'),
+    importComponentByKeyAsync: (key) => importFrom(components, key, 'component'),
+    importStyleByKeyAsync: (key) => importFrom(styles, key, 'style'),
+    async getStyleByIdAsync(id) {
+      return Object.values(styles).find((style) => style.id === id) || null;
+    },
     async getNodeByIdAsync(id) {
-      const stack = [root];
+      const stack = [root, ...imported];
       while (stack.length > 0) {
         const node = stack.pop();
         if (node.id === id) return node;
@@ -210,20 +372,24 @@ function fakeFigma({ importSvg = () => svgFrame(), pages = [] } = {}) {
   return figma;
 }
 
-/** Load plugin/code.js against `figma`, as Figma does when the plugin starts. */
+/** Load plugin/code.js against `figma`, as Figma does when the plugin starts. Returns its globals. */
 function loadPlugin(figma) {
-  vm.runInContext(PLUGIN_SOURCE, vm.createContext({ figma, __html__: '', console }), {
-    filename: 'plugin/code.js'
-  });
+  const context = vm.createContext({ figma, __html__: '', console });
+  vm.runInContext(PLUGIN_SOURCE, context, { filename: 'plugin/code.js' });
+  return context;
 }
 
-/** Send one command through the plugin's message handler; resolve to its response payload. */
+/**
+ * Send one command through the plugin's message handler; resolve to its
+ * response payload, serialized as postMessage would (which also brings the
+ * sandbox's objects into this realm, so deepEqual can compare them).
+ */
 async function sendCommand(figma, command, payload) {
   await figma.ui.onmessage({ type: 'command', requestId: 'req-1', command, payload });
   const response = figma.posted.at(-1);
   assert.equal(response.type, 'command_response');
   assert.equal(response.requestId, 'req-1');
-  return response.payload;
+  return JSON.parse(JSON.stringify(response.payload));
 }
 
 function close(actual, expected, message) {
@@ -457,5 +623,378 @@ describe('create_svg', () => {
     assert.equal(result.node.parentId, icons.id);
     assert.equal(result.node.pageId, icons.id);
     assert.equal(figma.currentPage.children.length, 0);
+  });
+});
+
+// ------------------------------------------------------------
+// Library components, styles and instance properties
+// ------------------------------------------------------------
+
+/** A fake file with the Button set published under its key and each variant's. */
+function libraryFigma(extra = {}) {
+  const set = buttonSet();
+  const components = {};
+  for (const variant of set.children) components[variant.key] = variant;
+  const figma = fakeFigma({ library: { componentSets: { [set.key]: set }, components, ...extra } });
+  return { figma, set };
+}
+
+describe('import_library_component', () => {
+  test('a set key returns its property definitions and every variant', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'import_library_component', { key: set.key });
+
+    assert.equal(result.success, true);
+    assert.equal(result.nodeId, set.id);
+    assert.equal(result.type, 'COMPONENT_SET');
+    assert.equal(result.remote, true);
+    assert.deepEqual(result.componentPropertyDefinitions.Variant, BUTTON_DEFINITIONS.Variant);
+    assert.equal(result.componentPropertyDefinitions['Label#12:0'].type, 'TEXT');
+    assert.deepEqual(result.defaultVariant, { id: set.children[0].id, name: 'Variant=Primary, Size=default' });
+    assert.equal(result.variantCount, 4);
+    assert.deepEqual(result.variants[3], {
+      id: set.children[3].id,
+      name: 'Variant=Secondary, Size=sm',
+      key: 'key-Secondary-sm',
+      variantProperties: { Variant: 'Secondary', Size: 'sm' }
+    });
+    assert.deepEqual(figma.libraryImports, [set.key], 'auto tries the set first');
+  });
+
+  test('a variant key falls back to the component import and names its set', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'import_library_component', { key: 'key-Secondary-sm' });
+
+    assert.equal(result.type, 'COMPONENT');
+    assert.deepEqual(result.variantProperties, { Variant: 'Secondary', Size: 'sm' });
+    assert.deepEqual(result.parentSet, { id: set.id, name: 'Button', key: set.key });
+    assert.deepEqual(Object.keys(result.componentPropertyDefinitions), Object.keys(BUTTON_DEFINITIONS));
+  });
+
+  test('includeVariants: false leaves the variant list out', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'import_library_component', { key: set.key, includeVariants: false });
+    assert.equal(result.variants, undefined);
+    assert.equal(result.variantCount, 4);
+  });
+
+  test('an unpublished key fails with LIBRARY_IMPORT_FAILED after both attempts', async () => {
+    const { figma } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'import_library_component', { key: 'nope' });
+
+    assert.equal(result.error.code, 'LIBRARY_IMPORT_FAILED');
+    assert.match(result.error.message, /componentSet: Failed to import component set/);
+    assert.match(result.error.message, /component: Failed to import component/);
+    assert.deepEqual(figma.libraryImports, ['nope', 'nope']);
+  });
+});
+
+describe('import_library_style', () => {
+  test('imports each key and reports the ones that failed', async () => {
+    const body = { id: 'S:body,', key: 'key-body', name: 'Body/Default', type: 'TEXT', remote: true };
+    const { figma } = libraryFigma({ styles: { 'key-body': body } });
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'import_library_style', { keys: ['key-body', 'key-gone'] });
+
+    assert.equal(result.success, false);
+    assert.deepEqual(result.styles, [{ key: 'key-body', id: 'S:body,', name: 'Body/Default', type: 'TEXT', remote: true }]);
+    assert.equal(result.errors.length, 1);
+    assert.equal(result.errors[0].key, 'key-gone');
+    assert.equal(result.errors[0].code, 'LIBRARY_IMPORT_FAILED');
+  });
+});
+
+describe('create_instance', () => {
+  test('a library key with properties picks the variant and sets the label', async () => {
+    const { figma, set } = libraryFigma();
+    const toolbar = new FakeFrame({ name: 'Toolbar', width: 400, height: 48 });
+    toolbar.appendChild(new FakeNode('RECTANGLE'));
+    figma.currentPage.appendChild(toolbar);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', {
+      componentKey: set.key,
+      properties: { Variant: 'Secondary', Size: 'sm', Label: 'Save', 'Show icon#3:1': true },
+      parentId: toolbar.id,
+      index: 0,
+      x: 8,
+      y: 4
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    const instance = toolbar.children[0];
+    assert.equal(result.nodeId, instance.id, 'inserted at index 0');
+    assert.equal(instance.main, set.children[3]);
+    assert.deepEqual([instance.x, instance.y], [8, 4]);
+    assert.deepEqual(result.mainComponent, {
+      id: set.children[3].id,
+      name: 'Variant=Secondary, Size=sm',
+      key: 'key-Secondary-sm',
+      remote: true,
+      parentSet: { id: set.id, name: 'Button', key: set.key }
+    });
+    assert.deepEqual(result.componentProperties, {
+      Variant: 'Secondary', Size: 'sm', 'Label#12:0': 'Save', 'Show icon#3:1': true, 'Icon#4:2': '9:1'
+    });
+  });
+
+  test('a local component set by id instantiates its default variant', async () => {
+    const figma = fakeFigma();
+    const set = buttonSet();
+    figma.currentPage.appendChild(set);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', { componentId: set.id });
+
+    assert.equal(result.success, true);
+    assert.equal(result.mainComponentId, set.children[0].id);
+    assert.equal(figma.currentPage.children.at(-1).id, result.nodeId);
+  });
+
+  test('an unknown variant option fails with the options and leaves nothing behind', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', { componentKey: set.key, properties: { Variant: 'Ghost' } });
+
+    assert.equal(result.error.code, 'INVALID_PROPERTIES');
+    assert.match(result.error.message, /"Ghost" is not an option of variant property "Variant"\. Options: Primary, Secondary/);
+    assert.equal(figma.currentPage.children.length, 0);
+  });
+
+  test('an out-of-range index fails before anything is imported', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', { componentKey: set.key, index: 1 });
+
+    assert.equal(result.error.code, 'INVALID_PARAMS');
+    assert.match(result.error.message, /out of range/);
+    assert.deepEqual(figma.libraryImports, []);
+  });
+
+  test('a missing parent fails with NODE_NOT_FOUND', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', { componentKey: set.key, parentId: '9:99' });
+    assert.equal(result.error.code, 'NODE_NOT_FOUND');
+  });
+
+  test('a node that is not a component fails with NOT_A_COMPONENT', async () => {
+    const figma = fakeFigma();
+    const frame = new FakeFrame({});
+    figma.currentPage.appendChild(frame);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', { componentId: frame.id });
+    assert.equal(result.error.code, 'NOT_A_COMPONENT');
+  });
+});
+
+describe('set_instance_properties', () => {
+  function placedInstance(options) {
+    const { figma, set } = libraryFigma();
+    const instance = new FakeInstance(set.children[0], options);
+    figma.currentPage.appendChild(instance);
+    return { figma, set, instance };
+  }
+
+  test('switches the variant, sets text and swaps the icon by library key', async () => {
+    const { figma, set, instance } = placedInstance();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'set_instance_properties', {
+      instanceId: instance.id,
+      properties: { Size: 'sm', 'Label#12:0': 'Cancel', Icon: 'key-Primary-default' }
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.deepEqual(result.applied, { Size: 'sm', 'Label#12:0': 'Cancel', 'Icon#4:2': set.children[0].id });
+    assert.equal(result.mainComponent.name, 'Variant=Primary, Size=sm');
+    assert.equal(result.componentProperties.Size, 'sm');
+    assert.equal(result.componentProperties['Label#12:0'], 'Cancel');
+    assert.deepEqual([result.width, result.height], [64, 28]);
+  });
+
+  test('a boolean stands for a "true"/"false" variant option', () => {
+    const context = loadPlugin(fakeFigma());
+    const definitions = { Disabled: { type: 'VARIANT', defaultValue: 'false', variantOptions: ['true', 'false'] } };
+    const resolved = context.resolvePropertyAssignments(definitions, { Disabled: true });
+    assert.deepEqual({ ...resolved.assignments }, { Disabled: 'true' });
+  });
+
+  test('an unknown or ambiguous name fails with INVALID_PROPERTIES', () => {
+    const context = loadPlugin(fakeFigma());
+    const definitions = {
+      'Label#1:0': { type: 'TEXT', defaultValue: '' },
+      'Label#2:0': { type: 'TEXT', defaultValue: '' }
+    };
+    assert.throws(() => context.resolvePropertyAssignments(definitions, { Label: 'x' }),
+      (e) => e.code === 'INVALID_PROPERTIES' && /ambiguous/.test(e.message));
+    assert.throws(() => context.resolvePropertyAssignments(definitions, { Title: 'x' }),
+      (e) => e.code === 'INVALID_PROPERTIES' && /Label#1:0 \(TEXT\)/.test(e.message));
+    assert.throws(() => context.resolvePropertyAssignments(definitions, { 'Label#1:0': true }),
+      (e) => e.code === 'INVALID_PROPERTIES' && /takes a string/.test(e.message));
+  });
+
+  test('a value that does not read back fails with PROPERTIES_NOT_APPLIED', async () => {
+    const { figma, instance } = placedInstance({ ignore: ['Label#12:0'] });
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'set_instance_properties', {
+      instanceId: instance.id,
+      properties: { Label: 'Cancel' }
+    });
+
+    assert.equal(result.error.code, 'PROPERTIES_NOT_APPLIED');
+    assert.match(result.error.message, /Label#12:0 reads back as "Button", not "Cancel"/);
+  });
+
+  test('a node that is not an instance fails with NOT_AN_INSTANCE', async () => {
+    const figma = fakeFigma();
+    const frame = new FakeFrame({});
+    figma.currentPage.appendChild(frame);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'set_instance_properties', { instanceId: frame.id, properties: { Size: 'sm' } });
+    assert.equal(result.error.code, 'NOT_AN_INSTANCE');
+  });
+});
+
+describe('replace_with_instance', () => {
+  /** A hand-made "Save" button between two siblings in `parent`. */
+  function handMadeButton(parent) {
+    const button = new FakeFrame({ name: 'Save button', x: 40, y: 12, width: 120, height: 40 });
+    button.constraints = { horizontal: 'MAX', vertical: 'CENTER' };
+    button.appendChild(new FakeText({ characters: 'Save' }));
+    parent.appendChild(new FakeNode('RECTANGLE'));
+    parent.appendChild(button);
+    parent.appendChild(new FakeNode('RECTANGLE'));
+    return button;
+  }
+
+  test('takes the target\'s index, position and constraints, copies its text, and deletes it', async () => {
+    const { figma, set } = libraryFigma();
+    const card = new FakeFrame({ name: 'Card', width: 300, height: 200 });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: target.id, componentKey: set.key, properties: { Variant: 'Secondary' }, textProperty: 'Label'
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(target.removed, true);
+    assert.equal(result.replacedId, target.id);
+    const instance = card.children[1];
+    assert.equal(card.children.length, 3);
+    assert.equal(instance.id, result.nodeId);
+    assert.deepEqual([instance.x, instance.y], [40, 12]);
+    assert.deepEqual({ ...instance.constraints }, { horizontal: 'MAX', vertical: 'CENTER' });
+    assert.deepEqual([instance.width, instance.height], [80, 36], 'the component keeps its own size');
+    assert.equal(result.componentProperties['Label#12:0'], 'Save');
+    assert.equal(result.componentProperties.Variant, 'Secondary');
+    assert.equal(result.copiedText.text, 'Save');
+    assert.equal(result.warnings, undefined);
+  });
+
+  test('inside auto-layout, an axis the target filled stays FILL; matchSize sizes the rest', async () => {
+    const { figma, set } = libraryFigma();
+    const form = new FakeFrame({ name: 'Form', width: 300, height: 200 });
+    form.layoutMode = 'VERTICAL';
+    figma.currentPage.appendChild(form);
+    const target = handMadeButton(form);
+    target.layoutSizingHorizontal = 'FILL';
+    target.layoutSizingVertical = 'FIXED';
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: target.id, componentKey: set.key, matchSize: true
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    const instance = form.children[1];
+    assert.equal(instance.layoutSizingHorizontal, 'FILL');
+    assert.equal(instance.height, 40, 'matchSize takes the target height');
+    assert.equal(instance.constraints, undefined, 'constraints are not set inside auto-layout');
+  });
+
+  test('a failure removes the instance and leaves the target untouched', async () => {
+    const { figma, set } = libraryFigma();
+    const card = new FakeFrame({ name: 'Card' });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    const before = card.children.slice();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: target.id, componentKey: set.key, properties: { Tone: 'Loud' }
+    });
+
+    assert.equal(result.error.code, 'INVALID_PROPERTIES');
+    assert.equal(target.removed, false);
+    assert.deepEqual(card.children, before);
+  });
+
+  test('textProperty on a target without text fails before anything is created', async () => {
+    const { figma, set } = libraryFigma();
+    const rectangle = new FakeNode('RECTANGLE');
+    figma.currentPage.appendChild(rectangle);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: rectangle.id, componentKey: set.key, textProperty: 'Label'
+    });
+
+    assert.equal(result.error.code, 'INVALID_PARAMS');
+    assert.deepEqual(figma.libraryImports, []);
+    assert.equal(rectangle.removed, false);
+  });
+});
+
+describe('node reads: component and text style details', () => {
+  function documentWithInstanceAndText() {
+    const style = { id: 'S:heading,', key: 'key-heading', name: 'Heading/H2', type: 'TEXT' };
+    const { figma, set } = libraryFigma({ styles: { 'key-heading': style } });
+    const instance = new FakeInstance(set.children[2]);
+    const heading = new FakeText({ characters: 'Title', textStyleId: style.id });
+    const plain = new FakeText({ characters: 'Plain' });
+    const mixed = new FakeText({ characters: 'Mixed', textStyleId: figma.mixed });
+    for (const node of [instance, heading, plain, mixed]) figma.currentPage.appendChild(node);
+    return { figma, set, instance, heading, plain, mixed };
+  }
+
+  test('figma_get_nodes adds mainComponent, componentProperties and the text style', async () => {
+    const { figma, set, instance, heading, plain, mixed } = documentWithInstanceAndText();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'get_nodes', { nodeIds: [instance.id, heading.id, plain.id, mixed.id] });
+    const [instanceNode, headingNode, plainNode, mixedNode] = result.nodes;
+
+    assert.deepEqual(instanceNode.mainComponent, {
+      id: set.children[2].id,
+      name: 'Variant=Secondary, Size=default',
+      key: 'key-Secondary-default',
+      remote: true,
+      parentSet: { id: set.id, name: 'Button', key: set.key }
+    });
+    assert.equal(instanceNode.componentProperties.Variant, 'Secondary');
+    assert.equal(instanceNode.componentProperties['Label#12:0'], 'Button');
+    assert.equal(headingNode.textStyleId, 'S:heading,');
+    assert.equal(headingNode.textStyleName, 'Heading/H2');
+    assert.equal(plainNode.textStyleId, undefined);
+    assert.equal(mixedNode.textStyleId, 'MIXED');
+    assert.equal(mixedNode.textStyleName, undefined);
+  });
+
+  test('minimal depth skips the lookups', async () => {
+    const { figma, instance } = documentWithInstanceAndText();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'get_nodes', { nodeIds: [instance.id], depth: 'minimal' });
+    assert.equal(result.nodes[0].mainComponent, undefined);
+    assert.equal(result.nodes[0].componentProperties, undefined);
+  });
+
+  test('figma_get_children compact carries them too', async () => {
+    const { figma } = documentWithInstanceAndText();
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'get_children', { parentId: figma.currentPage.id });
+    const [instanceNode, headingNode] = result.children;
+
+    assert.equal(instanceNode.mainComponent.parentSet.name, 'Button');
+    assert.equal(instanceNode.componentProperties.Size, 'default');
+    assert.equal(headingNode.textStyleName, 'Heading/H2');
   });
 });

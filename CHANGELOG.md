@@ -2,6 +2,53 @@
 
 All notable changes to `@magic-spells/figma-mcp-bridge` are documented here.
 
+## 0.6.0 (unreleased)
+
+Team-library components and styles. The bridge could only instance components
+already in the file, could not say what an instance was an instance of, and
+could not set variants, so swapping hand-made controls onto a published
+component set meant the official Figma MCP and its daily limits.
+
+Tool count: 98 (73 Figma design + 21 FigJam + 4 Prototype).
+
+### New tools
+
+- **`figma_import_library_component`** imports a published component or
+  component set by key and returns its id plus `componentPropertyDefinitions`
+  (type, default and variant options of each property). A set also lists every
+  variant's id, key and `variantProperties`. A key that is not published fails
+  with `LIBRARY_IMPORT_FAILED`.
+- **`figma_import_library_style`** imports text, paint, effect or grid styles
+  by key (`key`, or up to 50 `keys` in parallel) and returns each local style
+  id for `figma_apply_style`. Keys that fail are listed in `errors`.
+- **`figma_set_instance_properties`** sets variant, text, boolean and
+  instance-swap properties on an instance. Base names work (`Label` for
+  `Label#12:0`); an unknown name or variant option fails with
+  `INVALID_PROPERTIES` and lists the valid choices; every value is read back
+  (`PROPERTIES_NOT_APPLIED` otherwise).
+- **`figma_replace_with_instance`** swaps a node, such as a hand-made button,
+  for an instance in the same parent and layer index, keeping its position and
+  constraints (or FILL sizing in auto-layout) and copying its text into a TEXT
+  property. The original is deleted only once the instance is fully set up.
+
+### Changes
+
+- **`figma_create_instance`** takes `componentKey` (a library component or
+  set, imported on the fly) as well as `componentId`, plus `properties` and
+  `index`. A component set now instantiates its `defaultVariant` rather than
+  its first child. A missing `parentId` now fails with `NODE_NOT_FOUND`
+  instead of silently adding to the current page, and a failed call removes
+  the instance.
+- **Node reads show components and text styles.** `figma_get_nodes` (compact
+  and full), `figma_get_children` and `figma_search_nodes` give instances
+  `mainComponent` (`id`, `name`, `key`, `remote`, and `parentSet` for a
+  variant) and `componentProperties` as `{ name: value }`, and text nodes
+  `textStyleId` and `textStyleName`. The main component is read with
+  `getMainComponentAsync` and never walked. `minimal` depth is unchanged.
+- **`figma_search_components`** compact results include each component's `key`.
+- No new plugin permission is needed: library imports do not use the
+  `teamlibrary` permission.
+
 ## 0.5.0
 
 SVG import. Agents could only build icons from lines, ellipses and rectangles,

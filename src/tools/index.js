@@ -79,6 +79,11 @@ import {
   handleMoveToPage,
   // Instance commands
   handleSwapInstance,
+  handleSetInstanceProperties,
+  handleReplaceWithInstance,
+  // Team library imports
+  handleImportLibraryComponent,
+  handleImportLibraryStyle,
   // Additional commands
   handleDuplicatePage,
   handleSetRotation,
@@ -121,6 +126,7 @@ import {
   handleCreateSvg
 } from './mutations.js';
 import { MAX_SVG_LENGTH, HEX_COLOR_PATTERN } from './svg.js';
+import { MAX_STYLE_KEYS } from './components.js';
 
 // Color schema for fill/stroke shorthand
 const colorSchema = z.union([
@@ -176,6 +182,16 @@ const connectorEndpointSchema = z.object({
   }).optional().describe('Fixed position. Relative to the target node when nodeId is set; absolute canvas coordinates otherwise.')
 });
 
+// Component property values for figma_create_instance / figma_set_instance_properties /
+// figma_replace_with_instance. Names and values are checked against the
+// component's own definitions in the plugin.
+const componentPropertiesSchema = z.record(z.string(), z.union([z.string(), z.boolean()])).describe(
+  'Component properties to set, as { name: value }. Variants take one of their options ({ Variant: "Primary", ' +
+  'Size: "default" }); TEXT takes a string, BOOLEAN true/false, INSTANCE_SWAP a component id or library component ' +
+  'key. TEXT/BOOLEAN/INSTANCE_SWAP names carry a "#id" suffix in Figma ("Label#12:0"); the base name ("Label") ' +
+  'works when it is unambiguous. An unknown name or variant option fails with INVALID_PROPERTIES listing the choices.'
+);
+
 /**
  * Register all tools with the MCP server
  * @param {McpServer} server - MCP Server instance
@@ -227,7 +243,7 @@ export function registerTools(server, bridge) {
   // figma_get_nodes - Get node details by ID
   server.tool(
     'figma_get_nodes',
-    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes (strokeWeight reads "MIXED" plus the four per-side weights when sides differ), auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. Composite instance-sublayer IDs (the "I<instanceId>;<childId>" form) resolve reliably — if the direct lookup misses, the instance root is resolved and its subtree searched. IDs that genuinely do not exist come back in notFound with an explanation in notFoundDetails. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
+    'Get detailed information about specific Figma nodes by their IDs. Returns node properties including type, position, size, fills, strokes (strokeWeight reads "MIXED" plus the four per-side weights when sides differ), auto-layout (including layoutWrap and counterAxisSpacing), clipsContent, node-level boundVariables (which properties are bound to which variables), explicitVariableModes (variable modes pinned on the node), and more. INSTANCE nodes carry mainComponent { id, name, key, remote, parentSet { id, name, key } } and componentProperties as { name: value }; TEXT nodes carry textStyleId and textStyleName (compact depth too; minimal skips them). Composite instance-sublayer IDs (the "I<instanceId>;<childId>" form) resolve reliably — if the direct lookup misses, the instance root is resolved and its subtree searched. IDs that genuinely do not exist come back in notFound with an explanation in notFoundDetails. TIP: Use figma_search_nodes or figma_get_children FIRST to find node IDs efficiently, then use this tool only for nodes you need full details on.',
     {
       nodeIds: z.array(z.string()).describe('Array of Figma node IDs (e.g., ["1:23", "4:56"])'),
       depth: z.enum(['minimal', 'compact', 'full']).optional().default('full').describe('Detail level: "minimal" (~5 props: id, name, type, childIds), "compact" (~10 props: + x/y/width/height + childIds), "full" (all ~40 props). Use minimal/compact for tree traversal to reduce tokens.')
@@ -650,7 +666,7 @@ export function registerTools(server, bridge) {
   // figma_apply_style - Apply a style to a node
   server.tool(
     'figma_apply_style',
-    'Apply a local style to a node. Styles provide consistent, reusable design tokens. Works for all five style ' +
+    'Apply a style to a node: a local style, or a team-library style once figma_import_library_style has returned its id. Styles provide consistent, reusable design tokens. Works for all five style ' +
     'properties including text — the plugin uses the async setters (setTextStyleIdAsync / setFillStyleIdAsync / ' +
     'setStrokeStyleIdAsync / setEffectStyleIdAsync / setGridStyleIdAsync) that are mandatory under ' +
     'documentAccess: "dynamic-page". The applied style ID is read back off the node and returned as appliedStyleId ' +
@@ -681,18 +697,59 @@ export function registerTools(server, bridge) {
     async (args) => handleCreateComponent(bridge, args)
   );
 
-  // figma_create_instance - Create an instance of a component
+  // figma_create_instance - Create an instance of a local or library component
   server.tool(
     'figma_create_instance',
-    'Create a component instance.',
+    'Create a component instance, of a component in this file (componentId) or of a published team-library ' +
+    'component or component set (componentKey, imported on the fly — no figma_import_library_component call needed). ' +
+    'A component set instantiates its default variant; pass properties to pick another variant and set text, ' +
+    'boolean and instance-swap properties in the same call. Properties are verified by readback ' +
+    '(PROPERTIES_NOT_APPLIED otherwise). The parent and component are resolved first and the instance is removed if ' +
+    'a later step fails, so a failed call leaves nothing behind. The response carries mainComponent (with parentSet ' +
+    'for a variant) and the resulting componentProperties.',
     {
-      componentId: z.string().describe('The component ID to create an instance of'),
-      x: z.number().optional().default(0).describe('X position'),
-      y: z.number().optional().default(0).describe('Y position'),
-      parentId: z.string().optional().describe('Parent node ID (defaults to current page)'),
+      componentId: z.string().optional().describe('ID of a COMPONENT or COMPONENT_SET in this file (including one already imported from a library). Pass this or componentKey.'),
+      componentKey: z.string().optional().describe('Key of a published team-library component or component set. Pass this or componentId.'),
+      properties: componentPropertiesSchema.optional(),
+      x: z.number().optional().default(0).describe('X position, relative to the parent (ignored inside auto-layout)'),
+      y: z.number().optional().default(0).describe('Y position, relative to the parent (ignored inside auto-layout)'),
+      parentId: z.string().optional().describe('Parent node ID (defaults to current page). A missing parent fails with NODE_NOT_FOUND.'),
+      index: z.number().int().min(0).optional().describe('Position among the parent\'s children (0 = back of the layer stack, first in auto-layout order). Omit to add at the end.'),
       name: z.string().optional().describe('Instance name (defaults to component name)')
     },
     async (args) => handleCreateInstance(bridge, args)
+  );
+
+  // figma_import_library_component - Import a team-library component or component set by key
+  server.tool(
+    'figma_import_library_component',
+    'Import a component or component set published from a team library, by key, and describe it. Returns the ' +
+    'imported node id (usable as componentId anywhere), name, key, remote, and componentPropertyDefinitions: each ' +
+    'property\'s type (VARIANT, TEXT, BOOLEAN, INSTANCE_SWAP), defaultValue and, for variants, variantOptions. A ' +
+    'component set also returns defaultVariant and each variant\'s id, key and variantProperties; a variant ' +
+    'component returns its variantProperties and parentSet. A key that is not a published library component fails ' +
+    'with LIBRARY_IMPORT_FAILED. Keys come from the library (e.g. figma_get_nodes on an existing instance: ' +
+    'mainComponent.key / mainComponent.parentSet.key).',
+    {
+      key: z.string().describe('Component or component set key from the published library'),
+      kind: z.enum(['auto', 'component', 'componentSet']).optional().default('auto').describe('Which the key is. "auto" tries a component set, then a component.'),
+      includeVariants: z.boolean().optional().default(true).describe('For a component set, list every variant\'s id, key and variantProperties')
+    },
+    async (args) => handleImportLibraryComponent(bridge, args)
+  );
+
+  // figma_import_library_style - Import team-library styles by key
+  server.tool(
+    'figma_import_library_style',
+    'Import text, paint, effect or grid styles published from a team library, by key. Returns each style\'s local ' +
+    'id (pass it to figma_apply_style as styleId), name, type and key. Pass key for one style or keys for several; ' +
+    'they import in parallel. A key that fails is listed in errors (LIBRARY_IMPORT_FAILED) and makes the call an ' +
+    'error, with the styles that did import still listed.',
+    {
+      key: z.string().optional().describe('One style key'),
+      keys: z.array(z.string()).max(MAX_STYLE_KEYS).optional().describe(`Several style keys (at most ${MAX_STYLE_KEYS})`)
+    },
+    async (args) => handleImportLibraryStyle(bridge, args)
   );
 
   // ============================================================
@@ -733,7 +790,7 @@ export function registerTools(server, bridge) {
   // figma_search_nodes - Search nodes by name within a scope
   server.tool(
     'figma_search_nodes',
-    'Search for nodes by name within a scope. PREFERRED for finding specific frames, sections, or elements. Requires parentId to scope search. Returns compact results (~50 tokens/node vs ~500 for full).',
+    'Search for nodes by name within a scope. PREFERRED for finding specific frames, sections, or elements. Requires parentId to scope search. Returns compact results (~50 tokens/node vs ~500 for full). Instances carry mainComponent and componentProperties, text nodes textStyleId / textStyleName — search types: ["INSTANCE"] to audit which component each control uses.',
     {
       parentId: z.string().describe('Scope to search (page/frame/section ID). REQUIRED to prevent runaway queries.'),
       nameContains: z.string().optional().describe('Case-insensitive substring match. Example: "color scale" matches "Color Scale Section"'),
@@ -749,7 +806,7 @@ export function registerTools(server, bridge) {
   // figma_search_components - Search local components by name
   server.tool(
     'figma_search_components',
-    'Search local components by name. Use when looking for specific components like "Button", "Header", etc. Returns compact results with component metadata.',
+    'Search local components by name. Use when looking for specific components like "Button", "Header", etc. Returns compact results with component metadata, including each component\'s key. Searches this file only — for a team-library component, import it by key with figma_import_library_component (or pass componentKey to figma_create_instance).',
     {
       nameContains: z.string().optional().describe('Case-insensitive substring match'),
       namePattern: z.string().optional().describe('Glob pattern with wildcards'),
@@ -776,7 +833,7 @@ export function registerTools(server, bridge) {
   // figma_get_children - Get immediate children of a node
   server.tool(
     'figma_get_children',
-    'Get immediate children of a node. Use for browsing hierarchy one level at a time. More efficient than figma_get_nodes for exploring structure. Compact results include x/y, so they can be used to measure layout (e.g. which children share a row after wrapping). Composite instance-sublayer parent IDs ("I<instanceId>;<childId>") resolve here too.',
+    'Get immediate children of a node. Use for browsing hierarchy one level at a time. More efficient than figma_get_nodes for exploring structure. Compact results include x/y, so they can be used to measure layout (e.g. which children share a row after wrapping). Instances carry mainComponent (with parentSet for a variant) and componentProperties; text nodes carry textStyleId / textStyleName. Composite instance-sublayer parent IDs ("I<instanceId>;<childId>") resolve here too.',
     {
       parentId: z.string().describe('Node ID to get children of. REQUIRED.'),
       compact: z.boolean().optional().default(true).describe('Return minimal data (id, name, type, x, y, parentId, childCount). Set false for the full ~40-property serialization.')
@@ -1297,6 +1354,43 @@ export function registerTools(server, bridge) {
       newComponentId: z.string().describe('The component ID to swap to')
     },
     async (args) => handleSwapInstance(bridge, args)
+  );
+
+  // figma_set_instance_properties - Set variant / text / boolean / instance-swap properties
+  server.tool(
+    'figma_set_instance_properties',
+    'Set component properties on an instance: switch variants, set TEXT and BOOLEAN properties, and swap nested ' +
+    'instances (INSTANCE_SWAP, by component id or library component key). Names and values are checked against the ' +
+    'main component\'s definitions first, so an unknown name or variant option fails with INVALID_PROPERTIES listing ' +
+    'the valid choices. Every value is verified by readback (PROPERTIES_NOT_APPLIED otherwise). Returns the full ' +
+    'names applied, mainComponent (which changes with the variant) and the resulting componentProperties.',
+    {
+      instanceId: z.string().describe('The INSTANCE node ID'),
+      properties: componentPropertiesSchema
+    },
+    async (args) => handleSetInstanceProperties(bridge, args)
+  );
+
+  // figma_replace_with_instance - Swap a hand-made node for a component instance in place
+  server.tool(
+    'figma_replace_with_instance',
+    'Replace a node — typically a hand-made control — with an instance of a local or library component, in the ' +
+    'same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes ' +
+    'the target\'s x/y and constraints; inside auto-layout it takes FILL sizing on any axis the target filled. ' +
+    'HUG/FIXED sizes come from the component unless matchSize is set. textProperty copies the target\'s text (its ' +
+    'own, or its first text layer\'s) into that TEXT property. The target is deleted only after the instance is ' +
+    'fully set up; any failure removes the instance and leaves the target as it was. Returns the new nodeId, ' +
+    'replacedId, copiedText and the instance\'s componentProperties.',
+    {
+      targetId: z.string().describe('The node to replace'),
+      componentId: z.string().optional().describe('ID of a COMPONENT or COMPONENT_SET in this file. Pass this or componentKey.'),
+      componentKey: z.string().optional().describe('Key of a published team-library component or component set. Pass this or componentId.'),
+      properties: componentPropertiesSchema.optional(),
+      textProperty: z.string().optional().describe('TEXT property (e.g. "Label") to receive the target\'s text. An explicit value for it in properties wins.'),
+      matchSize: z.boolean().optional().default(false).describe('Resize the instance to the target\'s width/height (axes the target filled stay FILL)'),
+      name: z.string().optional().describe('Instance name (defaults to component name)')
+    },
+    async (args) => handleReplaceWithInstance(bridge, args)
   );
 
   // ============================================================
