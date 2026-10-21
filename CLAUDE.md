@@ -24,19 +24,27 @@ src/
 ├── websocket.js       # FigmaBridge class - WebSocket connection management
 ├── version.js         # The package version, read once from package.json
 └── tools/
-    ├── index.js       # Tool registration with Zod schemas (94 tools — 69 Figma + 21 FigJam + 4 Prototype)
+    ├── index.js       # Tool registration with Zod schemas (98 tools — 73 Figma + 21 FigJam + 4 Prototype)
     ├── context.js     # figma_get_context handler
     ├── pages.js       # figma_list_pages handler
     ├── nodes.js       # figma_get_nodes handler
     ├── mutations.js   # All mutation handlers (Figma + FigJam + Prototype)
-    └── svg.js         # figma_create_svg validation + currentColor substitution (pure)
+    ├── svg.js         # figma_create_svg validation + currentColor substitution (pure)
+    └── components.js  # library import / instance-property argument checks (pure)
 
 plugin/
 ├── manifest.json      # Figma plugin configuration
 ├── code.js            # Main plugin - Figma API command handlers
 └── ui.html            # WebSocket UI (runs in iframe)
 
-test/                  # node:test suites for the pure server-side code (npm test)
+skills/
+└── figma-bridge/
+    └── SKILL.md       # Operating guide, served as the MCP resource skill://figma-bridge/SKILL.md
+
+test/                  # node:test suites (npm test)
+├── svg.test.js        # SVG validation, currentColor substitution, handleCreateSvg
+├── library.test.js    # components.js checks, library/instance handlers, Zod schemas, tool count
+└── plugin.test.js     # plugin/code.js in a node:vm sandbox with a fake figma global
 ```
 
 The version lives in `package.json` and is read by `src/version.js`. The plugin cannot import it, so a release also bumps `pluginVersion` in the handshake in `plugin/code.js`; `npm test` fails until the two match.
@@ -244,7 +252,21 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 ### BridgeError Codes
 - `NOT_CONNECTED` - Plugin not connected
 - `TIMEOUT` - Command exceeded 30s
+- `CONNECTION_CLOSED` - The plugin disconnected while a command was pending
+- `UNKNOWN_ERROR` - Server-side fallback when an error carries no code
 - `NODE_NOT_FOUND` - Invalid node ID
+- `PAGE_NOT_FOUND` / `NOT_A_PAGE` - The page id is missing / is not a page
+- `PARENT_NOT_FOUND` / `INVALID_PARENT` - `figma_reparent_nodes` target is missing / cannot have children
+- `CANNOT_DELETE_LAST_PAGE` - `figma_delete_page` on the only page
+- `COLLECTION_NOT_FOUND` / `MODE_NOT_FOUND` - Variable collection or mode id does not exist
+- `CANNOT_DELETE_LAST_MODE` - `figma_delete_mode` on a collection's only mode
+- `PAINT_NOT_FOUND` - `figma_unbind_variable` paint index out of range
+- `STYLE_NOT_FOUND` / `REMOTE_STYLE` - `figma_delete_style`: no such style / it is a library style
+- `INSTANCE_NOT_FOUND` / `COMPONENT_NOT_FOUND` - `figma_swap_instance` ids do not resolve
+- `INVALID_NODE_TYPE` - `figma_combine_as_variants` given a node that is not a component
+- `INVALID_MAGNET` - Connector magnet not allowed for the line type (STRAIGHT takes CENTER/NONE only)
+- `SET_FAILED` - Per-node entry in `figma_set_size_limits` `errors` when a write throws
+- `NOT_SUPPORTED` - Node type lacks layout grids (`setLayoutGrids`, whose tool is disabled)
 - `INVALID_PARAMS` - Missing/invalid parameters
 - `INVALID_SVG` - `figma_create_svg` markup has no `<svg>` element, or Figma could not parse it
 - `OPERATION_FAILED` - Figma API error
@@ -262,6 +284,11 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 - `REORDER_FAILED` - The node's index did not read back as the requested final index
 - `EXPORT_WRITE_FAILED` - The export succeeded but the image could not be written to disk (path reported)
 - `EXPORT_NO_DATA` - Figma returned no image bytes, so nothing was written
+- `LIBRARY_IMPORT_FAILED` - No published team-library component, component set or style has that key
+- `NOT_A_COMPONENT` / `NOT_AN_INSTANCE` - The node is the wrong type for the tool
+- `INVALID_PROPERTIES` - A component property name, variant option or value type does not match the component's definitions (the message lists the valid choices), or Figma rejected the set
+- `PROPERTIES_NOT_APPLIED` - `setProperties` reported no error but a value does not read back
+- `MAIN_COMPONENT_MISSING` - The instance's main component is gone, so its properties cannot be set
 
 ### Standard Response Format
 
@@ -315,7 +342,7 @@ figma_search_styles({ nameContains: 'primary', type: 'PAINT' })
 
 13. **Reordering nodes** - `children` is read-only, so order is changed with `appendChild` / `insertChild`. **Never use `insertChild` to move a node that is already a child of the same parent** — Figma does not document whether the index is interpreted before or after the implicit removal, which is what made `figma_reorder_node` land one slot off. `reorderNode` computes the desired final sibling order and re-`appendChild`s the changed suffix (documented as "adds to the end", so no ambiguity), then verifies the index by readback
 
-14. **`mainComponent` is async** - Use `getMainComponentAsync()` for instances (currently skipped in serialization)
+14. **`mainComponent` is async** - The sync `instance.mainComponent` getter throws under dynamic-page, and `serializeNode` is synchronous, so it cannot read it. The read commands (`getNodes` at compact/full, `getChildren`, `searchNodes`) add it afterwards through `serializeForRead` → `addComponentDetails`, which also resolves a text node's style name (one shared lookup per style per read). The lookups run in batches of `READ_DETAIL_BATCH` (50) with `Promise.all`: one await per instance in sequence adds up toward the 30s timeout on a page of hundreds of instances, and firing them all at once floods Figma's main thread. It reads one level only: the main component and its parent set by id/name/key, never their children
 
 ## FigJam Constraints
 
@@ -412,12 +439,21 @@ Figma has several writes that report success and change nothing. The rule for th
 
 52. **Keep the import frame; size it like a browser** - `createNodeFromSvg` returns a FRAME at the SVG's own size (its width/height, which default to the viewBox), and it is kept even with `flatten`, because it carries the icon's padding. `figma.flatten(nodes, parent)` defaults `parent` to the current page, so the frame is passed explicitly. The flattened vector keeps one set of fills and strokes, so `describeMixedPaint` warns first when the shapes differ in fills, strokes, stroke weight or effective opacity (a group's included); otherwise the call would report success on an icon that no longer matches its SVG. Sizing uses `rescale()` (the Scale tool, so stroke weights scale as they do in a browser), through `rescaleBy`, which splits a shrink below rescale's 0.01 minimum factor into equal steps; with both width and height it fits uniformly, then `resizeWithoutConstraints` grows the frame to the box and the children are offset to center them (`xMidYMid meet`). A plain `resize()` would apply the children's constraints instead of scaling them. The parent is resolved before the import, and any throw after it calls `frame.remove()`, so a failed call leaves nothing behind.
 
+## Library Component Constraints
+
+53. **Library imports need no manifest permission** - `figma.importComponentByKeyAsync`, `importComponentSetByKeyAsync` and `importStyleByKeyAsync` work without it; the `teamlibrary` permission is only for the `figma.teamLibrary` listing API, which the bridge does not use. The import adds the published node to the file as a remote node, so its id then works anywhere a local id does (`componentId`, `figma_apply_style`). A key does not say whether it is a component or a set, so `importLibraryComponentByKey(key, 'auto')` tries the set, then the component, and reports both failures in `LIBRARY_IMPORT_FAILED`.
+
+54. **Property definitions live on the set** - Reading `componentPropertyDefinitions` on a variant throws; `propertyDefinitionsOf(component)` goes to the parent set. Figma suffixes TEXT / BOOLEAN / INSTANCE_SWAP names with `#<id>` (`Label#12:0`). `resolvePropertyAssignments` (pure) accepts the base name when it is unambiguous, checks variant options and value types, and throws `INVALID_PROPERTIES` listing the choices; INSTANCE_SWAP values (a component id or library key) become a component id before `setProperties`. Every value is then read back from `componentProperties` (`PROPERTIES_NOT_APPLIED`).
+
+55. **Creation resolves first, cleans up after** - `createInstance` and `replaceWithInstance` resolve parent, index and component before `createInstance()`, and remove the instance if a later step throws. `replaceWithInstance` removes the target only after the instance is placed and its properties verified; it refuses a COMPONENT / COMPONENT_SET target (deleting a master detaches its instances) and a target that contains the component being instanced, and loads a PAGE parent before reading its children (dynamic-page). A component set instantiates `defaultVariant`. `insertIntoParent` is for new nodes only — moving an existing child still goes through `reorderNode` (constraint 13).
+
 ## Tests
 
 `npm test` runs `node --test` over `test/`.
 
 - `test/svg.test.js` covers the pure server-side code (SVG validation and currentColor substitution) and the handler, driven by a fake bridge.
-- `test/plugin.test.js` loads `plugin/code.js` into a `node:vm` sandbox with a fake `figma` global and drives commands through `figma.ui.onmessage`, as the UI does. The fake models only the documented plugin API behavior a command relies on, so it checks the plugin's own logic (ordering, sizing math, cleanup, response shape) but not Figma itself: a change to how the plugin calls Figma still needs a reload of the plugin in Figma. It also fails when `pluginVersion` in the handshake drifts from `package.json`.
+- `test/library.test.js` covers `src/tools/components.js`, the library and instance handlers, and the registered Zod schemas (through a stand-in server that records each tool; it also pins the tool count).
+- `test/plugin.test.js` loads `plugin/code.js` into a `node:vm` sandbox with a fake `figma` global and drives commands through `figma.ui.onmessage`, as the UI does. The fake models only the documented plugin API behavior a command relies on, so it checks the plugin's own logic (ordering, sizing math, cleanup, response shape) but not Figma itself: a change to how the plugin calls Figma still needs a reload of the plugin in Figma. It also fails when `pluginVersion` in the handshake drifts from `package.json`. `loadPlugin` returns the sandbox's globals, so pure plugin helpers (e.g. `resolvePropertyAssignments`) can be called directly.
 
 Keep shared helpers out of `test/`: Node's runner runs every `.js` file under it as a test file.
 

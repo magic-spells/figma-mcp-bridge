@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Buffer } from 'node:buffer';
 import { validateSvgInput, substituteCurrentColor, withCurrentColorReport } from './svg.js';
+import { validateComponentSource, validateProperties, normalizeStyleKeys } from './components.js';
 
 // File extension per export format, for the default output path
 const EXPORT_EXTENSIONS = { PNG: 'png', SVG: 'svg', JPG: 'jpg', PDF: 'pdf' };
@@ -1460,63 +1461,13 @@ export async function handleCreateComponent(bridge, args) {
 }
 
 /**
- * Create an instance of a component
+ * Create an instance of a local component (componentId) or of a team-library
+ * component imported by key (componentKey), with optional component properties.
  */
 export async function handleCreateInstance(bridge, args) {
-  if (!bridge.isConnected()) {
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          error: {
-            code: 'NOT_CONNECTED',
-            message: 'Figma plugin is not connected.'
-          }
-        }, null, 2)
-      }],
-      isError: true
-    };
-  }
-
-  const { componentId } = args;
-
-  if (!componentId) {
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          error: {
-            code: 'INVALID_PARAMS',
-            message: 'componentId is required'
-          }
-        }, null, 2)
-      }],
-      isError: true
-    };
-  }
-
-  try {
-    const result = await bridge.sendCommand('create_instance', args);
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify(result, null, 2)
-      }]
-    };
-  } catch (error) {
-    return {
-      content: [{
-        type: 'text',
-        text: JSON.stringify({
-          error: {
-            code: error.code || 'UNKNOWN_ERROR',
-            message: error.message
-          }
-        }, null, 2)
-      }],
-      isError: true
-    };
-  }
+  const problem = validateComponentSource(args) || validateProperties(args.properties);
+  if (problem) return errorResult(problem.code, problem.message);
+  return runCommand(bridge, 'create_instance', args);
 }
 
 // ============================================================
@@ -4383,11 +4334,17 @@ export async function handleSetSizeLimits(bridge, args) {
     }
   }
 
-  const result = await runCommand(bridge, 'set_size_limits', args);
-  if (result.isError) return result;
-
   // The plugin verifies every write by readback; a limit that did not land comes
   // back as success: false with an errors array.
+  return flagUnsuccessful(await runCommand(bridge, 'set_size_limits', args));
+}
+
+/**
+ * Mark a runCommand response as an error when the plugin answered
+ * success: false — a partial failure that still carries results.
+ */
+function flagUnsuccessful(result) {
+  if (result.isError) return result;
   try {
     const parsed = JSON.parse(result.content[0].text);
     if (parsed && parsed.success === false) {
@@ -4460,4 +4417,60 @@ export async function handleCreateSvg(bridge, args) {
     { svg: substitution.svg, x, y, width, height, name, flatten, parentId },
     (result) => withCurrentColorReport(result, substitution, { fillColor, strokeColor })
   );
+}
+
+// ============================================================
+// Team library imports and instance properties
+// ============================================================
+
+/**
+ * Import a published team-library component or component set by key.
+ */
+export async function handleImportLibraryComponent(bridge, args) {
+  const { key, kind, includeVariants } = args;
+  if (typeof key !== 'string' || key.trim() === '') {
+    return invalidParams('key is required: the component or component set key from the library.');
+  }
+  return runCommand(bridge, 'import_library_component', { key, kind, includeVariants });
+}
+
+/**
+ * Import one or more published team-library styles by key. A key that fails
+ * makes the call an error, with the styles that did import still listed.
+ */
+export async function handleImportLibraryStyle(bridge, args) {
+  const normalized = normalizeStyleKeys(args);
+  if (normalized.problem) {
+    return errorResult(normalized.problem.code, normalized.problem.message);
+  }
+  return flagUnsuccessful(await runCommand(bridge, 'import_library_style', { keys: normalized.keys }));
+}
+
+/**
+ * Set component properties on an existing instance.
+ */
+export async function handleSetInstanceProperties(bridge, args) {
+  const { instanceId, properties } = args;
+  if (typeof instanceId !== 'string' || instanceId.trim() === '') {
+    return invalidParams('instanceId is required');
+  }
+  const problem = validateProperties(properties, { required: true });
+  if (problem) return errorResult(problem.code, problem.message);
+  return runCommand(bridge, 'set_instance_properties', { instanceId, properties });
+}
+
+/**
+ * Replace a node with an instance of a component, in its place.
+ */
+export async function handleReplaceWithInstance(bridge, args) {
+  const { targetId, textProperty } = args;
+  if (typeof targetId !== 'string' || targetId.trim() === '') {
+    return invalidParams('targetId is required');
+  }
+  if (textProperty !== undefined && (typeof textProperty !== 'string' || textProperty.trim() === '')) {
+    return invalidParams('textProperty must be the name of a TEXT component property');
+  }
+  const problem = validateComponentSource(args) || validateProperties(args.properties);
+  if (problem) return errorResult(problem.code, problem.message);
+  return runCommand(bridge, 'replace_with_instance', args);
 }
