@@ -2,7 +2,7 @@
 
 All notable changes to `@magic-spells/figma-mcp-bridge` are documented here.
 
-## 0.6.0 (unreleased)
+## 0.6.0
 
 Team-library components and styles. The bridge could only instance components
 already in the file, could not say what an instance was an instance of, and
