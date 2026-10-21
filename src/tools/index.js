@@ -1379,7 +1379,8 @@ export function registerTools(server, bridge) {
     'the target\'s x/y and constraints; inside auto-layout it takes FILL sizing on any axis the target filled. ' +
     'HUG/FIXED sizes come from the component unless matchSize is set. textProperty copies the target\'s text (its ' +
     'own, or its first text layer\'s) into that TEXT property. The target is deleted only after the instance is ' +
-    'fully set up; any failure removes the instance and leaves the target as it was. Returns the new nodeId, ' +
+    'fully set up; any failure removes the instance and leaves the target as it was. A component or component set ' +
+    'cannot be the target (deleting a master detaches its instances). Returns the new nodeId, ' +
     'replacedId, copiedText and the instance\'s componentProperties.',
     {
       targetId: z.string().describe('The node to replace'),

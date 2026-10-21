@@ -755,7 +755,7 @@ Set component properties on an instance: variants, `TEXT`, `BOOLEAN`, and `INSTA
 Returns `applied` (full names), `mainComponent` (which follows the variant), `componentProperties`, `width` and `height`.
 
 #### `figma_replace_with_instance`
-Replace a node — typically a hand-made control — with an instance, in the same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes the target's `x`/`y` and constraints; inside auto-layout it takes `FILL` on any axis the target filled. Hug/fixed sizes come from the component unless `matchSize` is set. The target is deleted only after the instance is fully set up; on any failure the instance is removed and the target is left as it was.
+Replace a node — typically a hand-made control — with an instance, in the same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes the target's `x`/`y` and constraints; inside auto-layout it takes `FILL` on any axis the target filled. Hug/fixed sizes come from the component unless `matchSize` is set. The target is deleted only after the instance is fully set up; on any failure the instance is removed and the target is left as it was. A component or component set cannot be the target (deleting it would detach its instances).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

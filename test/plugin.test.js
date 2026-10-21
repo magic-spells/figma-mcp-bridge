@@ -128,6 +128,11 @@ class FakePage extends FakeContainer {
     if (!this.loaded) throw new Error('The page has not been loaded. Call loadAsync() first.');
     super.appendChild(node);
   }
+
+  insertChild(index, node) {
+    if (!this.loaded) throw new Error('The page has not been loaded. Call loadAsync() first.');
+    super.insertChild(index, node);
+  }
 }
 
 class FakeText extends FakeNode {
@@ -930,6 +935,52 @@ describe('replace_with_instance', () => {
     assert.deepEqual(card.children, before);
   });
 
+  test('a target on a page that is not loaded yet: the page is loaded first', async () => {
+    const other = new FakePage('Page 2', { loaded: false });
+    const set = buttonSet();
+    const figma = fakeFigma({ pages: [other], library: { componentSets: { [set.key]: set } } });
+    const target = new FakeFrame({ name: 'Save button' });
+    other.children.push(target);
+    target.parent = other;
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', { targetId: target.id, componentKey: set.key });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(other.loaded, true);
+    assert.deepEqual(other.children.map((n) => n.id), [result.nodeId]);
+  });
+
+  test('a component master is refused, since deleting it would detach its instances', async () => {
+    const { figma } = libraryFigma();
+    const local = buttonSet();
+    const other = new FakeComponent({ name: 'Chip', key: 'key-chip', remote: false });
+    figma.currentPage.appendChild(local);
+    figma.currentPage.appendChild(other);
+    loadPlugin(figma);
+
+    for (const target of [local, other]) {
+      const result = await sendCommand(figma, 'replace_with_instance', { targetId: target.id, componentKey: 'key-button-set' });
+      assert.equal(result.error.code, 'INVALID_PARAMS');
+      assert.match(result.error.message, /would detach every instance/);
+      assert.equal(target.removed, false);
+    }
+  });
+
+  test('a target holding the component it would be replaced by is refused', async () => {
+    const figma = fakeFigma();
+    const board = new FakeFrame({ name: 'Board' });
+    const chip = new FakeComponent({ name: 'Chip', key: 'key-chip', remote: false });
+    board.appendChild(chip);
+    figma.currentPage.appendChild(board);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', { targetId: board.id, componentId: chip.id });
+
+    assert.equal(result.error.code, 'INVALID_PARAMS');
+    assert.match(result.error.message, /own main component/);
+    assert.equal(board.removed, false);
+    assert.deepEqual(figma.currentPage.children, [board], 'no instance left behind');
+  });
+
   test('textProperty on a target without text fails before anything is created', async () => {
     const { figma, set } = libraryFigma();
     const rectangle = new FakeNode('RECTANGLE');
@@ -985,6 +1036,25 @@ describe('node reads: component and text style details', () => {
     const result = await sendCommand(figma, 'get_nodes', { nodeIds: [instance.id], depth: 'minimal' });
     assert.equal(result.nodes[0].mainComponent, undefined);
     assert.equal(result.nodes[0].componentProperties, undefined);
+  });
+
+  test('a large read describes every instance and looks each text style up once', async () => {
+    const style = { id: 'S:body,', key: 'key-body', name: 'Body', type: 'TEXT' };
+    const { figma, set } = libraryFigma({ styles: { 'key-body': style } });
+    let styleLookups = 0;
+    const getStyle = figma.getStyleByIdAsync;
+    figma.getStyleByIdAsync = (id) => { styleLookups++; return getStyle(id); };
+    for (let i = 0; i < 120; i++) {
+      figma.currentPage.appendChild(i % 2 ? new FakeInstance(set.children[i % 4]) : new FakeText({ textStyleId: style.id }));
+    }
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'get_children', { parentId: figma.currentPage.id });
+
+    assert.equal(result.children.length, 120);
+    assert.deepEqual(result.children.map((n) => n.id), figma.currentPage.children.map((n) => n.id), 'order kept');
+    assert.ok(result.children.filter((n) => n.type === 'INSTANCE').every((n) => n.mainComponent.parentSet.key === set.key));
+    assert.ok(result.children.filter((n) => n.type === 'TEXT').every((n) => n.textStyleName === 'Body'));
+    assert.equal(styleLookups, 1);
   });
 
   test('figma_get_children compact carries them too', async () => {

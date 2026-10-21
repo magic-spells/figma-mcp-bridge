@@ -446,24 +446,24 @@ async function getNodes({ nodeIds = [], depth }) {
   var notFound = [];
   var notFoundDetails = [];
   var serializeDepth = depth || 'full';
-
-  var styleNames = {};
+  var serialize = function(n) { return serializeNode(n, serializeDepth); };
 
   for (var i = 0; i < nodeIds.length; i++) {
     var nodeId = nodeIds[i];
     var node = await resolveNodeById(nodeId);
     if (node) {
-      var serialized = serializeNode(node, serializeDepth);
-      // minimal stays minimal: no component or style lookups.
-      if (serializeDepth !== 'minimal') await addComponentDetails(serialized, node, styleNames);
-      nodes.push(serialized);
+      nodes.push(node);
     } else {
       notFound.push(nodeId);
       notFoundDetails.push({ id: nodeId, message: describeUnresolvedId(nodeId) });
     }
   }
 
-  var result = { nodes: nodes, notFound: notFound };
+  var result = {
+    // minimal stays minimal: no component or style lookups.
+    nodes: serializeDepth === 'minimal' ? nodes.map(serialize) : await serializeForRead(nodes, serialize),
+    notFound: notFound
+  };
   if (notFoundDetails.length > 0) {
     result.notFoundDetails = notFoundDetails;
   }
@@ -5954,6 +5954,14 @@ async function setInstanceProperties(params) {
   };
 }
 
+/** True when `ancestor` contains `node` at any depth. */
+function isAncestorOf(ancestor, node) {
+  for (var current = node.parent; current; current = current.parent) {
+    if (current === ancestor || current.id === ancestor.id) return true;
+  }
+  return false;
+}
+
 /**
  * The text a hand-made control shows: its own characters for a TEXT node,
  * else its first TEXT descendant's, in layer order.
@@ -6014,6 +6022,16 @@ async function replaceWithInstance(params) {
     throw notReplaceable;
   }
   assertNotInstanceSublayer(target, 'Replacing a node', 'Replace it on the component master instead.');
+  if (target.type === 'COMPONENT' || target.type === 'COMPONENT_SET') {
+    var isMaster = new Error('Node ' + target.id + ' ("' + target.name + '") is a ' + target.type + ': deleting it ' +
+      'would detach every instance of it. Replace its instances instead, or delete it with figma_delete_nodes.');
+    isMaster.code = 'INVALID_PARAMS';
+    throw isMaster;
+  }
+  // dynamic-page: a page's children are readable only once it is loaded.
+  if (parent.type === 'PAGE' && typeof parent.loadAsync === 'function') {
+    await parent.loadAsync();
+  }
 
   var properties = Object.assign({}, params.properties || {});
   var copied = null;
@@ -6039,6 +6057,12 @@ async function replaceWithInstance(params) {
   }
 
   var component = await resolveComponentSource(params);
+  if (isAncestorOf(target, component)) {
+    var inside = new Error('Component "' + component.name + '" (' + component.id + ') is inside ' + target.id +
+      ', so removing the target would delete the instance\'s own main component.');
+    inside.code = 'INVALID_PARAMS';
+    throw inside;
+  }
   var index = parent.children.indexOf(target);
   var instance = component.createInstance();
   try {
@@ -6096,7 +6120,8 @@ function addComponentFields(target, node) {
  * instance's mainComponent (getMainComponentAsync — the sync getter throws
  * under dynamic-page) and a text node's style name. One level only: the main
  * component and its set are described by id/name/key, never walked.
- * `styleNames` caches style id → name across the nodes of one read.
+ * `styleNames` caches style id → name lookup (a promise) across one read, so
+ * concurrent nodes with the same style share a single getStyleByIdAsync.
  */
 async function addComponentDetails(target, node, styleNames) {
   addComponentFields(target, node);
@@ -6108,26 +6133,36 @@ async function addComponentDetails(target, node, styleNames) {
       target.mainComponent = null;
     }
   } else if (target.textStyleId && target.textStyleId !== 'MIXED') {
-    if (!Object.prototype.hasOwnProperty.call(styleNames, target.textStyleId)) {
-      var style = null;
-      try {
-        style = await figma.getStyleByIdAsync(target.textStyleId);
-      } catch (_) {
-        style = null;
-      }
-      styleNames[target.textStyleId] = style ? style.name : null;
+    var styleId = target.textStyleId;
+    if (!Object.prototype.hasOwnProperty.call(styleNames, styleId)) {
+      styleNames[styleId] = Promise.resolve().then(function() { return figma.getStyleByIdAsync(styleId); }).then(
+        function(style) { return style ? style.name : null; },
+        function() { return null; }
+      );
     }
-    if (styleNames[target.textStyleId]) target.textStyleName = styleNames[target.textStyleId];
+    var styleName = await styleNames[styleId];
+    if (styleName) target.textStyleName = styleName;
   }
   return target;
 }
 
-/** Serialize nodes for a read, with addComponentDetails on each. */
+/**
+ * How many nodes' async lookups one read runs at once. A page can hold
+ * hundreds of instances: one await after another adds up toward the bridge's
+ * 30s timeout, while firing them all at once floods Figma's main thread.
+ */
+var READ_DETAIL_BATCH = 50;
+
+/** Serialize nodes for a read, with addComponentDetails on each, in batches. */
 async function serializeForRead(nodes, serialize) {
   var styleNames = {};
   var results = [];
-  for (var i = 0; i < nodes.length; i++) {
-    results.push(await addComponentDetails(serialize(nodes[i]), nodes[i], styleNames));
+  for (var start = 0; start < nodes.length; start += READ_DETAIL_BATCH) {
+    var batch = nodes.slice(start, start + READ_DETAIL_BATCH);
+    var described = await Promise.all(batch.map(function(node) {
+      return addComponentDetails(serialize(node), node, styleNames);
+    }));
+    for (var i = 0; i < described.length; i++) results.push(described[i]);
   }
   return results;
 }
