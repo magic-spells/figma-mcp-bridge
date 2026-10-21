@@ -3555,7 +3555,8 @@ function requireWritableEditor(command) {
     describeCurrentEditor() + '. ' +
     'Read tools still work here: figma_get_context, figma_list_pages, figma_get_nodes, ' +
     'figma_get_children, the figma_search_* tools, figma_get_local_styles, ' +
-    'figma_get_local_variables, and figma_export_node. ' +
+    'figma_get_local_variables, figma_export_node, figma_set_selection and ' +
+    'figma_set_current_page. ' +
     'To edit this file, open it in the Figma Design editor with an editor seat.'
   );
   err.code = 'READ_ONLY_EDITOR';
