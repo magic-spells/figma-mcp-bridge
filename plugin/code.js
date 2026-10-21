@@ -1940,7 +1940,7 @@ async function createComponent(params) {
  * created; a failure after that (a property Figma rejects, say) removes the
  * instance, so a failed call leaves nothing behind.
  *
- * @param {Object} params - { componentId | componentKey, properties, x, y, parentId, index, name }
+ * @param {Object} params - { componentId | componentKey, properties, x, y, parentId, index, name, compact }
  */
 async function createInstance(params) {
   var parent = await resolveCreateParent(params.parentId);
@@ -1948,20 +1948,21 @@ async function createInstance(params) {
   var component = await resolveComponentSource(params);
 
   var instance = component.createInstance();
+  var warnings = [];
   try {
     insertIntoParent(parent, instance, params.index);
     if (params.x !== undefined) instance.x = params.x;
     if (params.y !== undefined) instance.y = params.y;
     if (params.name) instance.name = params.name;
     if (params.properties && Object.keys(params.properties).length > 0) {
-      await applyInstanceProperties(instance, params.properties);
+      warnings = (await applyInstanceProperties(instance, params.properties)).warnings;
     }
   } catch (e) {
     instance.remove();
     throw e;
   }
 
-  return describeCreatedInstance(instance);
+  return describeCreatedInstance(instance, warnings.length > 0 ? { warnings: warnings } : null, params.compact !== false);
 }
 
 // ============================================================
@@ -5756,7 +5757,10 @@ async function resolveSwapComponentId(propertyName, value) {
  * Set component properties on an instance and verify them by readback.
  * Names and values are checked against the main component's definitions
  * first, so a typo fails with the valid choices instead of Figma's message.
- * @returns {Promise<Object>} the full property names and values applied
+ * A value that does not read back is an error; a TEXT value that reads back
+ * but that no text layer shows is a warning (see checkTextPropertiesShown).
+ * @returns {Promise<{ assignments: Object, warnings: string[] }>} the full
+ *   property names and values applied, and any text-layer warnings
  */
 async function applyInstanceProperties(instance, requested) {
   var main = await instance.getMainComponentAsync();
@@ -5766,7 +5770,8 @@ async function applyInstanceProperties(instance, requested) {
     throw missing;
   }
 
-  var resolved = resolvePropertyAssignments(propertyDefinitionsOf(main), requested);
+  var definitions = propertyDefinitionsOf(main);
+  var resolved = resolvePropertyAssignments(definitions, requested);
   var assignments = resolved.assignments;
   for (var i = 0; i < resolved.swaps.length; i++) {
     var name = resolved.swaps[i];
@@ -5795,7 +5800,70 @@ async function applyInstanceProperties(instance, requested) {
     err.code = 'PROPERTIES_NOT_APPLIED';
     throw err;
   }
-  return assignments;
+  return { assignments: assignments, warnings: await checkTextPropertiesShown(instance, definitions, assignments) };
+}
+
+/** Text with \r\n and lone \r as \n, so a value and the layer showing it compare equal. */
+function normalizeLineEndings(text) {
+  return String(text).replace(/\r\n?/g, '\n');
+}
+
+/** The TEXT property a text layer's characters are bound to, or null. */
+function boundTextProperty(node) {
+  try {
+    var refs = node.componentPropertyReferences;
+    return (refs && refs.characters) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 'variant "Variant=Primary, Size=sm" of "Button"' for a variant, 'component "Chip"' for a lone one. */
+function describeVariant(component) {
+  if (!component) return 'its main component';
+  var set = parentSetOf(component);
+  return set ? 'variant "' + component.name + '" of "' + set.name + '"' : 'component "' + component.name + '"';
+}
+
+/**
+ * Check the text layers of an instance show the TEXT properties just set.
+ * componentProperties reads a TEXT value back even when no layer shows it:
+ * a variant can define the property without binding its text layer to it,
+ * and then the instance keeps rendering the layer's own text. So each TEXT
+ * value is also looked for in the layers whose
+ * componentPropertyReferences.characters name that property. These are
+ * warnings, not errors: the property itself was set, and the fix belongs in
+ * the component.
+ * @returns {Promise<string[]>} TEXT_PROPERTY_UNBOUND / TEXT_PROPERTY_NOT_RENDERED warnings
+ */
+async function checkTextPropertiesShown(instance, definitions, assignments) {
+  var textNames = Object.keys(assignments).filter(function(name) {
+    return definitions[name] && definitions[name].type === 'TEXT';
+  });
+  if (textNames.length === 0) return [];
+
+  var texts = instance.findAll(function(n) { return n.type === 'TEXT'; });
+  var where = describeVariant(await instance.getMainComponentAsync());
+  var warnings = [];
+  for (var i = 0; i < textNames.length; i++) {
+    var name = textNames[i];
+    var value = assignments[name];
+    var bound = texts.filter(function(n) { return boundTextProperty(n) === name; });
+    if (bound.length === 0) {
+      warnings.push('TEXT_PROPERTY_UNBOUND: "' + name + '" was set to ' + JSON.stringify(value) + ' and reads back, ' +
+        'but no text layer in ' + where + ' is bound to it, so the instance does not show it. Bind that ' +
+        'variant\'s text layer to the property in the component.');
+      continue;
+    }
+    var wrong = bound.filter(function(n) { return normalizeLineEndings(n.characters) !== normalizeLineEndings(value); });
+    if (wrong.length > 0) {
+      warnings.push('TEXT_PROPERTY_NOT_RENDERED: "' + name + '" was set to ' + JSON.stringify(value) + ', but ' +
+        wrong.map(function(n) {
+          return 'text layer ' + n.id + ' "' + n.name + '" shows ' + JSON.stringify(n.characters);
+        }).join('; ') + ' in ' + where + '.');
+    }
+  }
+  return warnings;
 }
 
 /**
@@ -5863,13 +5931,37 @@ function insertIntoParent(parent, node, index) {
   }
 }
 
-/** The response for a created or swapped-in instance. */
-async function describeCreatedInstance(instance, extra) {
+/**
+ * An instance as a write returns it by default: where it is and how big,
+ * without the ~40-property full serialization (figma_get_nodes has that).
+ */
+function serializeInstanceCompact(instance) {
+  return {
+    id: instance.id,
+    name: instance.name,
+    type: instance.type,
+    parentId: instance.parent ? instance.parent.id : null,
+    x: instance.x,
+    y: instance.y,
+    width: instance.width,
+    height: instance.height,
+    rotation: instance.rotation,
+    opacity: instance.opacity,
+    visible: instance.visible,
+    locked: instance.locked
+  };
+}
+
+/**
+ * The response for a created or swapped-in instance: compact unless
+ * compact is false, which returns the full node.
+ */
+async function describeCreatedInstance(instance, extra, compact) {
   var main = await instance.getMainComponentAsync();
   return Object.assign({
     success: true,
     nodeId: instance.id,
-    node: serializeNode(instance, 'full'),
+    node: compact ? serializeInstanceCompact(instance) : serializeNode(instance, 'full'),
     mainComponentId: main ? main.id : null,
     mainComponentName: main ? main.name : null,
     mainComponent: main ? describeMainComponent(main) : null,
@@ -5878,14 +5970,16 @@ async function describeCreatedInstance(instance, extra) {
 }
 
 /**
- * Import a team-library component or component set by key.
+ * Import a team-library component or component set by key. A set's variant
+ * list is left out unless includeVariants is true: the property definitions
+ * are enough to pick a variant, and a large set lists hundreds.
  * @param {Object} params - { key, kind, includeVariants }
  */
 async function importLibraryComponent(params) {
   var node = await importLibraryComponentByKey(params.key, params.kind);
   return Object.assign(
     { success: true, nodeId: node.id },
-    describeLibraryComponent(node, params.includeVariants !== false)
+    describeLibraryComponent(node, params.includeVariants === true)
   );
 }
 
@@ -5942,17 +6036,19 @@ async function setInstanceProperties(params) {
     throw notInstance;
   }
 
-  var applied = await applyInstanceProperties(instance, params.properties);
+  var outcome = await applyInstanceProperties(instance, params.properties);
   var main = await instance.getMainComponentAsync();
-  return {
+  var result = {
     success: true,
     instanceId: instance.id,
-    applied: applied,
+    applied: outcome.assignments,
     mainComponent: main ? describeMainComponent(main) : null,
     componentProperties: flattenComponentProperties(instance.componentProperties),
     width: instance.width,
     height: instance.height
   };
+  if (outcome.warnings.length > 0) result.warnings = outcome.warnings;
+  return result;
 }
 
 /** True when `ancestor` contains `node` at any depth. */
@@ -5977,8 +6073,9 @@ function readControlText(node) {
 }
 
 /**
- * Give a replacement instance the target's place in its parent: x/y and
- * constraints outside auto-layout (or when absolute), FILL sizing inside it.
+ * Give a replacement instance the target's place in its parent: rotation,
+ * x/y and constraints outside auto-layout (or when absolute), FILL sizing
+ * inside it.
  * HUG and FIXED sizing are left to the component unless matchSize is set,
  * because the component's own size is usually the point of the swap.
  */
@@ -5989,6 +6086,10 @@ function placeLike(instance, target, parent, matchSize) {
   var fillV = inAutoLayout && !absolute && target.layoutSizingVertical === 'FILL';
 
   if (inAutoLayout && absolute) instance.layoutPositioning = 'ABSOLUTE';
+  // Setting rotation keeps the node's x/y (its transform origin), so the order
+  // against x/y does not matter. A flip (negative scale in relativeTransform)
+  // is not carried.
+  if ('rotation' in target && target.rotation) instance.rotation = target.rotation;
   if (!inAutoLayout || absolute) {
     instance.x = target.x;
     instance.y = target.y;
@@ -6001,13 +6102,86 @@ function placeLike(instance, target, parent, matchSize) {
   if (fillV) instance.layoutSizingVertical = 'FILL';
 }
 
+/** The node fields whose variable binds a replacement carries over. */
+var CARRIED_BOUND_FIELDS = ['visible', 'opacity'];
+
+/**
+ * Give a replacement instance the target's layer state: its name (unless one
+ * was given), opacity, visibility and lock, any variable bound to visible or
+ * opacity, and, for a target inside a component, a component property bound
+ * to its visibility (componentPropertyReferences.visible). Fills, strokes,
+ * effects and blend mode are the component's look and are not carried;
+ * placement is placeLike's. The Plugin API ignores locks, so the order of
+ * these writes does not matter.
+ * @returns {Promise<string[]>} warnings for binds that could not be carried
+ */
+async function carryLayerState(instance, target, name) {
+  var warnings = [];
+  instance.name = name || target.name;
+  if ('opacity' in target) instance.opacity = target.opacity;
+  if ('visible' in target) instance.visible = target.visible;
+
+  var binds = target.boundVariables || {};
+  for (var i = 0; i < CARRIED_BOUND_FIELDS.length; i++) {
+    var field = CARRIED_BOUND_FIELDS[i];
+    var alias = binds[field];
+    if (!alias || !alias.id) continue;
+    try {
+      var variable = await figma.variables.getVariableByIdAsync(alias.id);
+      if (!variable) throw new Error('the variable no longer exists');
+      instance.setBoundVariable(field, variable);
+    } catch (e) {
+      warnings.push('The target\'s ' + field + ' was bound to variable ' + alias.id + ', which could not be bound ' +
+        'on the instance (' + thrownMessage(e) + '); the instance holds the target\'s value, ' +
+        JSON.stringify(target[field]) + ', unbound.');
+    }
+  }
+
+  warnings = warnings.concat(carryPropertyReferences(instance, target));
+  if ('locked' in target) instance.locked = target.locked;
+  return warnings;
+}
+
+/**
+ * A target inside a component master can have its visibility bound to a
+ * BOOLEAN component property; the replacement takes that bind. A characters
+ * or mainComponent reference belongs to the target's own text or instance
+ * swap, which the replacement does not have, so it is reported, not carried.
+ * @returns {string[]} warnings
+ */
+function carryPropertyReferences(instance, target) {
+  var refs = null;
+  try {
+    refs = target.componentPropertyReferences;
+  } catch (_) {
+    refs = null;
+  }
+  if (!refs) return [];
+  var warnings = [];
+  if (refs.visible) {
+    try {
+      instance.componentPropertyReferences = { visible: refs.visible };
+    } catch (e) {
+      warnings.push('The target\'s visibility was bound to component property "' + refs.visible + '", which could ' +
+        'not be bound on the instance (' + thrownMessage(e) + '); rebind it in the component.');
+    }
+  }
+  var dropped = ['characters', 'mainComponent'].filter(function(field) { return refs[field]; });
+  for (var i = 0; i < dropped.length; i++) {
+    warnings.push('The target\'s ' + dropped[i] + ' was bound to component property "' + refs[dropped[i]] +
+      '"; the instance does not carry that binding. Rebind it in the component if it is still needed.');
+  }
+  return warnings;
+}
+
 /**
  * Replace a node (typically a hand-made control) with an instance of a
  * component, in the same parent, at the same index and place. With
  * textProperty, the target's text is copied into that TEXT property.
- * The target is removed only after the instance is fully set up; any earlier
- * failure removes the instance and leaves the target untouched.
- * @param {Object} params - { targetId, componentKey | componentId, properties, textProperty, name, matchSize }
+ * The instance keeps the target's layer state (carryLayerState). The target
+ * is removed only after the instance is fully set up; any earlier failure
+ * removes the instance and leaves the target untouched.
+ * @param {Object} params - { targetId, componentKey | componentId, properties, textProperty, name, matchSize, compact }
  */
 async function replaceWithInstance(params) {
   var target = await resolveNodeById(params.targetId);
@@ -6068,10 +6242,12 @@ async function replaceWithInstance(params) {
   var instance = component.createInstance();
   try {
     insertIntoParent(parent, instance, index);
-    if (params.name) instance.name = params.name;
     // Properties first: a variant change can resize the instance.
-    if (Object.keys(properties).length > 0) await applyInstanceProperties(instance, properties);
+    if (Object.keys(properties).length > 0) {
+      warnings = warnings.concat((await applyInstanceProperties(instance, properties)).warnings);
+    }
     placeLike(instance, target, parent, params.matchSize);
+    warnings = warnings.concat(await carryLayerState(instance, target, params.name));
   } catch (e) {
     instance.remove();
     throw e;
@@ -6084,7 +6260,7 @@ async function replaceWithInstance(params) {
   var extra = { replacedId: replacedId, replacedName: replacedName };
   if (copied) extra.copiedText = { property: params.textProperty, text: copied.text, fromNodeId: copied.sourceId };
   if (warnings.length > 0) extra.warnings = warnings;
-  return describeCreatedInstance(instance, extra);
+  return describeCreatedInstance(instance, extra, params.compact !== false);
 }
 
 // ------------------------------------------------------------

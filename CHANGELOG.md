@@ -2,6 +2,44 @@
 
 All notable changes to `@magic-spells/figma-mcp-bridge` are documented here.
 
+## 0.6.1 (unreleased)
+
+Fixes from the first real run of the 0.6.0 library tools.
+
+### Fixes
+
+- **`figma_replace_with_instance` keeps the target's layer state.** A hidden
+  target came back as a visible instance. The instance now takes the
+  target's visibility, lock, opacity and rotation, a variable bound to
+  `visible` or `opacity` (a bind that cannot be carried is a warning), a
+  component property bound to its visibility when the target sits inside a
+  component (a bound text or instance-swap property is reported, not
+  carried), and its layer name unless `name` is given (it used to default to
+  the component's name). Fills, strokes, effects, blend mode and a flip stay
+  the component's.
+- **TEXT properties are checked on the canvas, not only in
+  `componentProperties`.** A variant that defines a TEXT property without
+  binding its text layer reads the value back while still showing its own
+  text, so `figma_create_instance`, `figma_set_instance_properties` and
+  `figma_replace_with_instance` reported success on a button still labelled
+  "Button". After a TEXT property is set, the text layers bound to it
+  (`componentPropertyReferences.characters`) are compared with the value: none
+  bound gives a `TEXT_PROPERTY_UNBOUND` warning naming the variant, a bound
+  layer showing other text `TEXT_PROPERTY_NOT_RENDERED`. Warnings, not
+  errors: the property is set, and the fix belongs in the component.
+
+### Behaviour changes
+
+- **`node` is now compact by default; pass `compact: false` for the previous
+  shape.** `figma_create_instance` and `figma_replace_with_instance` return
+  `node` as `id`, `name`, `type`, `parentId`, `x`, `y`, `width`, `height`,
+  `rotation`, `opacity`, `visible` and `locked`, beside `mainComponent` and
+  `componentProperties`, instead of the full ~40-property node.
+- **`figma_import_library_component` leaves the variant list out by default**
+  (`includeVariants` now defaults to `false`). `componentPropertyDefinitions`
+  already name every variant option, `defaultVariant` and `variantCount` stay,
+  and a 150-variant set no longer lists all 150.
+
 ## 0.6.0
 
 Team-library components and styles. The bridge could only instance components

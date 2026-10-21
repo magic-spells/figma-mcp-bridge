@@ -58,12 +58,19 @@ where a 16:9 one belonged, a heading breaking mid-word, and a button hugging at
   means the markup needs fixing. Export and look at the result.
 - **Team-library components (v0.6.0+):** use the published component instead of
   drawing a control. `figma_import_library_component` with the set's key returns
-  its property definitions and variants; `figma_create_instance` with
+  its property definitions (pass `includeVariants: true` only when you need
+  each variant's id or key); `figma_create_instance` with
   `componentKey` and `properties` (`{ Variant: 'Primary', Size: 'default',
   Label: 'Save' }`) places one. To swap a hand-made control for the real one,
-  `figma_replace_with_instance` keeps its index, position and FILL sizing and
-  copies its text with `textProperty`. Change an instance later with
-  `figma_set_instance_properties`. `INVALID_PROPERTIES` lists the valid names
+  `figma_replace_with_instance` keeps its index, position, FILL sizing,
+  rotation, visibility, lock, opacity and layer name, and copies its text with
+  `textProperty`. Change an instance later with
+  `figma_set_instance_properties`. Writes answer with a compact node; pass
+  `compact: false` only when you need the full one. Read `warnings`: a
+  `TEXT_PROPERTY_UNBOUND` or `TEXT_PROPERTY_NOT_RENDERED` warning means the
+  property was set but the canvas does not show it, because the variant's text
+  layer is not bound to the property: fix the component in the library rather
+  than overriding the layer. `INVALID_PROPERTIES` lists the valid names
   and options; `LIBRARY_IMPORT_FAILED` means the key is not published. Find
   keys on an existing instance: `figma_get_nodes` gives `mainComponent.key` and
   `mainComponent.parentSet.key`. Export and look after a swap: the component's
