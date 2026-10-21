@@ -56,6 +56,22 @@ where a 16:9 one belonged, a heading breaking mid-word, and a button hugging at
   padding, so icons share one box and align. To make an icon component, pass
   the frame's id to `figma_create_component` as `fromNodeId`. `INVALID_SVG`
   means the markup needs fixing. Export and look at the result.
+- **Team-library components (v0.6.0+):** use the published component instead of
+  drawing a control. `figma_import_library_component` with the set's key returns
+  its property definitions and variants; `figma_create_instance` with
+  `componentKey` and `properties` (`{ Variant: 'Primary', Size: 'default',
+  Label: 'Save' }`) places one. To swap a hand-made control for the real one,
+  `figma_replace_with_instance` keeps its index, position and FILL sizing and
+  copies its text with `textProperty`. Change an instance later with
+  `figma_set_instance_properties`. `INVALID_PROPERTIES` lists the valid names
+  and options; `LIBRARY_IMPORT_FAILED` means the key is not published. Find
+  keys on an existing instance: `figma_get_nodes` gives `mainComponent.key` and
+  `mainComponent.parentSet.key`. Export and look after a swap: the component's
+  own size may differ from the control it replaced.
+- **Library text styles:** `figma_import_library_style` (one `key` or many
+  `keys`) returns local ids; apply them with `figma_apply_style`. Text reads
+  show `textStyleId` / `textStyleName`, so check which style a text layer
+  carries before and after.
 - **Sizing a child to its parent:** use `figma_set_layout_align: STRETCH`, not
   `figma_resize_nodes`. STRETCH preserves width/height variable binds; resize
   may destroy them (the bridge re-applies and warns, but STRETCH avoids the

@@ -231,6 +231,15 @@ async function handleCommand(command, payload) {
     // Instance commands
     case 'swap_instance':
       return await swapInstance(payload);
+    case 'set_instance_properties':
+      return await setInstanceProperties(payload);
+    case 'replace_with_instance':
+      return await replaceWithInstance(payload);
+    // Team library imports
+    case 'import_library_component':
+      return await importLibraryComponent(payload);
+    case 'import_library_style':
+      return await importLibraryStyles(payload);
     // Additional commands
     case 'duplicate_page':
       return await duplicatePage(payload);
@@ -437,19 +446,24 @@ async function getNodes({ nodeIds = [], depth }) {
   var notFound = [];
   var notFoundDetails = [];
   var serializeDepth = depth || 'full';
+  var serialize = function(n) { return serializeNode(n, serializeDepth); };
 
   for (var i = 0; i < nodeIds.length; i++) {
     var nodeId = nodeIds[i];
     var node = await resolveNodeById(nodeId);
     if (node) {
-      nodes.push(serializeNode(node, serializeDepth));
+      nodes.push(node);
     } else {
       notFound.push(nodeId);
       notFoundDetails.push({ id: nodeId, message: describeUnresolvedId(nodeId) });
     }
   }
 
-  var result = { nodes: nodes, notFound: notFound };
+  var result = {
+    // minimal stays minimal: no component or style lookups.
+    nodes: serializeDepth === 'minimal' ? nodes.map(serialize) : await serializeForRead(nodes, serialize),
+    notFound: notFound
+  };
   if (notFoundDetails.length > 0) {
     result.notFoundDetails = notFoundDetails;
   }
@@ -1234,6 +1248,37 @@ async function createText(params) {
 // ============================================================
 
 /**
+ * Resolve the parent a creation command will add its node to, before anything
+ * is created, so a bad id fails without leaving a half-made node behind.
+ * No parentId means the current page. A page is loaded first: under
+ * documentAccess: dynamic-page, appendChild on an unloaded PageNode throws.
+ * @param {string} [parentId]
+ * @returns {Promise<BaseNode>} a node that can hold children
+ */
+async function resolveCreateParent(parentId) {
+  if (!parentId) return figma.currentPage;
+
+  var parent = await resolveNodeById(parentId);
+  if (!parent) {
+    var notFound = new Error(describeUnresolvedId(parentId));
+    notFound.code = 'NODE_NOT_FOUND';
+    throw notFound;
+  }
+  if (!('appendChild' in parent)) {
+    var notContainer = new Error(
+      'Parent ' + parentId + ' (' + parent.type + ') cannot contain other nodes. ' +
+      'Pass a page, frame, group, section or component as parentId.'
+    );
+    notContainer.code = 'INVALID_PARAMS';
+    throw notContainer;
+  }
+  if (parent.type === 'PAGE' && typeof parent.loadAsync === 'function') {
+    await parent.loadAsync();
+  }
+  return parent;
+}
+
+/**
  * Import SVG markup with figma.createNodeFromSvg(), the editor's own SVG import.
  * The server has already validated the markup and replaced currentColor, which
  * Figma cannot resolve, so this only parses, sizes and places the result.
@@ -1256,27 +1301,7 @@ async function createSvg(params) {
   var height = params.height;
 
   // Resolve the parent first, so a bad id fails before anything is created.
-  var parent = figma.currentPage;
-  if (params.parentId) {
-    parent = await resolveNodeById(params.parentId);
-    if (!parent) {
-      var notFound = new Error(describeUnresolvedId(params.parentId));
-      notFound.code = 'NODE_NOT_FOUND';
-      throw notFound;
-    }
-    if (!('appendChild' in parent)) {
-      var notContainer = new Error(
-        'Parent ' + params.parentId + ' (' + parent.type + ') cannot contain other nodes. ' +
-        'Pass a page, frame, group, section or component as parentId.'
-      );
-      notContainer.code = 'INVALID_PARAMS';
-      throw notContainer;
-    }
-    // dynamic-page: appendChild on a PageNode needs the page loaded first
-    if (parent.type === 'PAGE' && typeof parent.loadAsync === 'function') {
-      await parent.loadAsync();
-    }
-  }
+  var parent = await resolveCreateParent(params.parentId);
 
   var frame;
   try {
@@ -1908,61 +1933,35 @@ async function createComponent(params) {
 }
 
 /**
- * Create an instance of a component
- * @param {Object} params - { componentId, x, y, parentId, name }
+ * Create an instance of a local component, or of a component imported from a
+ * team library by key, and optionally set its component properties.
+ *
+ * The parent, index and component are all resolved before the instance is
+ * created; a failure after that (a property Figma rejects, say) removes the
+ * instance, so a failed call leaves nothing behind.
+ *
+ * @param {Object} params - { componentId | componentKey, properties, x, y, parentId, index, name }
  */
 async function createInstance(params) {
-  const {
-    componentId,
-    x = 0,
-    y = 0,
-    parentId,
-    name
-  } = params;
+  var parent = await resolveCreateParent(params.parentId);
+  assertInsertIndex(parent, params.index);
+  var component = await resolveComponentSource(params);
 
-  const component = await figma.getNodeByIdAsync(componentId);
-  if (!component) {
-    throw new Error(`Component not found: ${componentId}`);
-  }
-
-  if (component.type !== 'COMPONENT' && component.type !== 'COMPONENT_SET') {
-    throw new Error(`Node ${componentId} is not a component (type: ${component.type})`);
-  }
-
-  // For COMPONENT_SET, get the default variant
-  let targetComponent = component;
-  if (component.type === 'COMPONENT_SET') {
-    if (component.children.length > 0) {
-      targetComponent = component.children[0];
-    } else {
-      throw new Error('Component set has no variants');
+  var instance = component.createInstance();
+  try {
+    insertIntoParent(parent, instance, params.index);
+    if (params.x !== undefined) instance.x = params.x;
+    if (params.y !== undefined) instance.y = params.y;
+    if (params.name) instance.name = params.name;
+    if (params.properties && Object.keys(params.properties).length > 0) {
+      await applyInstanceProperties(instance, params.properties);
     }
+  } catch (e) {
+    instance.remove();
+    throw e;
   }
 
-  const instance = targetComponent.createInstance();
-  instance.x = x;
-  instance.y = y;
-
-  if (name) {
-    instance.name = name;
-  }
-
-  // Add to parent if specified
-  if (parentId) {
-    const parent = await figma.getNodeByIdAsync(parentId);
-    if (parent && 'appendChild' in parent) {
-      parent.appendChild(instance);
-    }
-  } else {
-    figma.currentPage.appendChild(instance);
-  }
-
-  return {
-    success: true,
-    node: serializeNode(instance, 'full'),
-    mainComponentId: targetComponent.id,
-    mainComponentName: targetComponent.name
-  };
+  return describeCreatedInstance(instance);
 }
 
 // ============================================================
@@ -2368,14 +2367,9 @@ async function searchNodes(params) {
   }
 
   // Serialize results
-  var results;
-  if (compact) {
-    results = filtered.map(serializeNodeCompact);
-  } else {
-    results = filtered.map(function(n) {
-      return serializeNode(n, 'full');
-    });
-  }
+  var results = await serializeForRead(filtered, compact ? serializeNodeCompact : function(n) {
+    return serializeNode(n, 'full');
+  });
 
   return {
     success: true,
@@ -2453,6 +2447,11 @@ async function searchComponents(params) {
         name: node.name,
         type: node.type
       };
+      // The key is what a library import or a componentKey needs; local
+      // components have one too (it imports once the library is published).
+      if (node.key) {
+        result.key = node.key;
+      }
       if (node.description) {
         result.description = node.description;
       }
@@ -2617,15 +2616,9 @@ async function getChildren(params) {
   }
 
   var children = parent.children;
-  var results;
-
-  if (compact) {
-    results = children.map(serializeNodeCompact);
-  } else {
-    results = children.map(function(n) {
-      return serializeNode(n, 'full');
-    });
-  }
+  var results = await serializeForRead(children, compact ? serializeNodeCompact : function(n) {
+    return serializeNode(n, 'full');
+  });
 
   return {
     success: true,
@@ -4931,10 +4924,13 @@ function serializeNode(node, depth) {
       base.componentPropertyDefinitions = clone(node.componentPropertyDefinitions);
     }
   }
-  // Skip mainComponent for now - requires async which complicates serialization
   if (node.type === 'INSTANCE') {
     base.isInstance = true;
   }
+  // componentProperties / textStyleId. mainComponent needs getMainComponentAsync
+  // (the sync getter throws under dynamic-page), so the read commands add it
+  // after serializing, through addComponentDetails.
+  addComponentFields(base, node);
 
   // FigJam-specific node properties
   if (node.type === 'STICKY') {
@@ -5501,6 +5497,674 @@ async function moveToPage({ nodeIds, targetPageId, x, y }) {
     moved: results,
     errors: errors.length > 0 ? errors : undefined
   };
+}
+
+// ============================================================
+// Library Components, Styles and Instance Properties
+// ============================================================
+//
+// Team-library components arrive through figma.importComponentByKeyAsync /
+// importComponentSetByKeyAsync, styles through importStyleByKeyAsync. These
+// need no manifest permission (the "teamlibrary" permission is only for the
+// figma.teamLibrary listing API). An import copies the published node into the
+// file as a remote node, so its id then works anywhere a local id does.
+
+/** The message of a thrown value, which Figma does not always make an Error. */
+function thrownMessage(e) {
+  return (e && e.message) || String(e);
+}
+
+/**
+ * Import a published component or component set by key.
+ * A key alone does not say which of the two it belongs to, so kind 'auto'
+ * tries the set first, then the component.
+ * @param {string} key
+ * @param {'auto'|'component'|'componentSet'} [kind]
+ * @returns {Promise<ComponentNode|ComponentSetNode>}
+ */
+async function importLibraryComponentByKey(key, kind) {
+  var attempts = kind === 'component' ? ['component']
+    : kind === 'componentSet' ? ['componentSet']
+    : ['componentSet', 'component'];
+  var failures = [];
+  for (var i = 0; i < attempts.length; i++) {
+    try {
+      if (attempts[i] === 'componentSet') return await figma.importComponentSetByKeyAsync(key);
+      return await figma.importComponentByKeyAsync(key);
+    } catch (e) {
+      failures.push(attempts[i] + ': ' + thrownMessage(e));
+    }
+  }
+  var err = new Error(
+    'No published library ' + (kind === 'component' ? 'component' : kind === 'componentSet' ? 'component set' : 'component or component set') +
+    ' with key "' + key + '" could be imported (' + failures.join('; ') + '). The key must belong to a component ' +
+    'published from a team library this account can open: publish the library, and check the key is a component ' +
+    'key, not a file key or node id. For a component already in this file, pass its componentId instead.'
+  );
+  err.code = 'LIBRARY_IMPORT_FAILED';
+  throw err;
+}
+
+/** The COMPONENT_SET a variant belongs to, or null for a standalone component. */
+function parentSetOf(component) {
+  return component.parent && component.parent.type === 'COMPONENT_SET' ? component.parent : null;
+}
+
+/**
+ * The property definitions that govern a component. Variants carry none of
+ * their own (reading them throws): their set holds the definitions.
+ */
+function propertyDefinitionsOf(component) {
+  if (component.type === 'COMPONENT_SET') return component.componentPropertyDefinitions;
+  var set = parentSetOf(component);
+  return set ? set.componentPropertyDefinitions : component.componentPropertyDefinitions;
+}
+
+/** { name: { type, defaultValue, variantOptions?, preferredValues? } }, without variable binds. */
+function compactPropertyDefinitions(definitions) {
+  var result = {};
+  var names = Object.keys(definitions || {});
+  for (var i = 0; i < names.length; i++) {
+    var def = definitions[names[i]];
+    var entry = { type: def.type, defaultValue: def.defaultValue };
+    if (def.variantOptions) entry.variantOptions = def.variantOptions.slice();
+    if (def.preferredValues && def.preferredValues.length > 0) entry.preferredValues = clone(def.preferredValues);
+    result[names[i]] = entry;
+  }
+  return result;
+}
+
+/** An instance's componentProperties as a flat { name: value } map. */
+function flattenComponentProperties(properties) {
+  var result = {};
+  var names = Object.keys(properties || {});
+  for (var i = 0; i < names.length; i++) {
+    result[names[i]] = properties[names[i]].value;
+  }
+  return result;
+}
+
+/** id, name, key and remote, the fields that identify a component or set. */
+function componentRef(node) {
+  return { id: node.id, name: node.name, key: node.key, remote: node.remote };
+}
+
+/** What an instance is an instance of: the component, and its set when it is a variant. */
+function describeMainComponent(component) {
+  var ref = componentRef(component);
+  var set = parentSetOf(component);
+  if (set) ref.parentSet = { id: set.id, name: set.name, key: set.key };
+  return ref;
+}
+
+/**
+ * A component or component set as figma_import_library_component returns it:
+ * its property definitions, and for a set, each variant's id and properties.
+ */
+function describeLibraryComponent(node, includeVariants) {
+  var result = componentRef(node);
+  result.type = node.type;
+  if (node.description) result.description = node.description;
+  result.componentPropertyDefinitions = compactPropertyDefinitions(propertyDefinitionsOf(node));
+
+  if (node.type === 'COMPONENT_SET') {
+    var defaultVariant = node.defaultVariant || node.children[0];
+    if (defaultVariant) result.defaultVariant = { id: defaultVariant.id, name: defaultVariant.name };
+    result.variantCount = node.children.length;
+    if (includeVariants) {
+      result.variants = node.children.map(function(variant) {
+        return {
+          id: variant.id,
+          name: variant.name,
+          key: variant.key,
+          variantProperties: clone(variant.variantProperties)
+        };
+      });
+    }
+  } else {
+    var set = parentSetOf(node);
+    if (set) {
+      result.variantProperties = clone(node.variantProperties);
+      result.parentSet = { id: set.id, name: set.name, key: set.key };
+    }
+  }
+  return result;
+}
+
+/** The property name without Figma's "#<id>" suffix ("Label#12:0" → "Label"). */
+function basePropertyName(name) {
+  var hash = name.lastIndexOf('#');
+  return hash > 0 ? name.slice(0, hash) : name;
+}
+
+function invalidProperties(message) {
+  var err = new Error(message);
+  err.code = 'INVALID_PROPERTIES';
+  return err;
+}
+
+/** "Variant (VARIANT: Primary | Secondary), Label#12:0 (TEXT)" — for error messages. */
+function listPropertyDefinitions(definitions) {
+  var names = Object.keys(definitions);
+  if (names.length === 0) return 'none — this component has no component properties';
+  return names.map(function(name) {
+    var def = definitions[name];
+    var options = def.variantOptions ? ': ' + def.variantOptions.join(' | ') : '';
+    return name + ' (' + def.type + options + ')';
+  }).join(', ');
+}
+
+/**
+ * Match requested properties to a component's definitions, and check each
+ * value against its type. Pure: it reads only its arguments.
+ *
+ * A name matches exactly, or by its base name: Figma suffixes every TEXT,
+ * BOOLEAN and INSTANCE_SWAP property with "#<id>", so "Label" finds
+ * "Label#12:0" when exactly one property has that base name.
+ *
+ * @param {Object} definitions - componentPropertyDefinitions
+ * @param {Object} requested - { name: string | boolean }
+ * @returns {{ assignments: Object, swaps: string[] }} full names → values; the
+ *   INSTANCE_SWAP names, whose values still need resolving to a component id
+ * @throws INVALID_PROPERTIES naming the property and the valid choices
+ */
+function resolvePropertyAssignments(definitions, requested) {
+  definitions = definitions || {};
+  var names = Object.keys(definitions);
+  var assignments = {};
+  var swaps = [];
+  var requestedNames = Object.keys(requested || {});
+
+  for (var i = 0; i < requestedNames.length; i++) {
+    var asked = requestedNames[i];
+    var value = requested[asked];
+    var fullName = null;
+
+    if (Object.prototype.hasOwnProperty.call(definitions, asked)) {
+      fullName = asked;
+    } else {
+      var matches = names.filter(function(name) { return basePropertyName(name) === asked; });
+      if (matches.length > 1) {
+        throw invalidProperties('Property "' + asked + '" is ambiguous: it matches ' + matches.join(', ') +
+          '. Pass the full name with its #id suffix.');
+      }
+      if (matches.length === 0) {
+        throw invalidProperties('No component property named "' + asked + '". Properties: ' +
+          listPropertyDefinitions(definitions) + '.');
+      }
+      fullName = matches[0];
+    }
+
+    if (Object.prototype.hasOwnProperty.call(assignments, fullName)) {
+      throw invalidProperties('Property "' + fullName + '" is set twice (as "' + asked + '" and another name).');
+    }
+
+    var def = definitions[fullName];
+    if (def.type === 'VARIANT') {
+      // Variant values are strings; a boolean is accepted for "true"/"false" options.
+      var text = typeof value === 'boolean' ? String(value) : value;
+      if (typeof text !== 'string') {
+        throw invalidProperties('Variant property "' + fullName + '" takes a string value.');
+      }
+      if (def.variantOptions && def.variantOptions.indexOf(text) === -1) {
+        throw invalidProperties('"' + text + '" is not an option of variant property "' + fullName + '". Options: ' +
+          def.variantOptions.join(', ') + '.');
+      }
+      value = text;
+    } else if (def.type === 'BOOLEAN') {
+      if (typeof value !== 'boolean') {
+        throw invalidProperties('Boolean property "' + fullName + '" takes true or false.');
+      }
+    } else if (def.type === 'TEXT') {
+      if (typeof value !== 'string') {
+        throw invalidProperties('Text property "' + fullName + '" takes a string.');
+      }
+    } else if (def.type === 'INSTANCE_SWAP') {
+      if (typeof value !== 'string' || value === '') {
+        throw invalidProperties('Instance-swap property "' + fullName + '" takes a component id or a library component key.');
+      }
+      swaps.push(fullName);
+    }
+    assignments[fullName] = value;
+  }
+
+  return { assignments: assignments, swaps: swaps };
+}
+
+/**
+ * Turn an instance-swap value into the component id setProperties expects:
+ * a component already in the file (by id), else a library component key.
+ */
+async function resolveSwapComponentId(propertyName, value) {
+  var node = null;
+  try {
+    node = await figma.getNodeByIdAsync(value);
+  } catch (_) {
+    node = null; // not shaped like a node id — try it as a key
+  }
+  if (node) {
+    if (node.type === 'COMPONENT') return node.id;
+    throw invalidProperties('Instance-swap property "' + propertyName + '" needs a COMPONENT; ' + value + ' is a ' +
+      node.type + (node.type === 'COMPONENT_SET' ? ' — pass one of its variants\' ids.' : '.'));
+  }
+  var imported = await importLibraryComponentByKey(value, 'component');
+  return imported.id;
+}
+
+/**
+ * Set component properties on an instance and verify them by readback.
+ * Names and values are checked against the main component's definitions
+ * first, so a typo fails with the valid choices instead of Figma's message.
+ * @returns {Promise<Object>} the full property names and values applied
+ */
+async function applyInstanceProperties(instance, requested) {
+  var main = await instance.getMainComponentAsync();
+  if (!main) {
+    var missing = new Error('Instance ' + instance.id + ' has no main component (it was deleted, or its library is unavailable), so its properties cannot be set.');
+    missing.code = 'MAIN_COMPONENT_MISSING';
+    throw missing;
+  }
+
+  var resolved = resolvePropertyAssignments(propertyDefinitionsOf(main), requested);
+  var assignments = resolved.assignments;
+  for (var i = 0; i < resolved.swaps.length; i++) {
+    var name = resolved.swaps[i];
+    assignments[name] = await resolveSwapComponentId(name, assignments[name]);
+  }
+
+  try {
+    instance.setProperties(assignments);
+  } catch (e) {
+    var rejected = new Error('Figma rejected the properties ' + JSON.stringify(assignments) + ' on instance ' +
+      instance.id + ': ' + thrownMessage(e));
+    rejected.code = 'INVALID_PROPERTIES';
+    throw rejected;
+  }
+
+  // No success without readback: a property that did not take is an error.
+  var after = instance.componentProperties || {};
+  var notApplied = Object.keys(assignments).filter(function(key) {
+    return !after[key] || after[key].value !== assignments[key];
+  });
+  if (notApplied.length > 0) {
+    var err = new Error('setProperties() reported no error, but ' + notApplied.map(function(key) {
+      return key + ' reads back as ' + (after[key] ? JSON.stringify(after[key].value) : 'absent') +
+        ', not ' + JSON.stringify(assignments[key]);
+    }).join('; ') + '.');
+    err.code = 'PROPERTIES_NOT_APPLIED';
+    throw err;
+  }
+  return assignments;
+}
+
+/**
+ * The component a creation command instantiates: a library import by
+ * componentKey, or a local node by componentId. A component set stands for
+ * its default variant (properties then pick another).
+ * @returns {Promise<ComponentNode>}
+ */
+async function resolveComponentSource(params) {
+  var node;
+  if (params.componentKey) {
+    node = await importLibraryComponentByKey(params.componentKey, 'auto');
+  } else if (params.componentId) {
+    node = await resolveNodeById(params.componentId);
+    if (!node) {
+      var notFound = new Error(describeUnresolvedId(params.componentId));
+      notFound.code = 'NODE_NOT_FOUND';
+      throw notFound;
+    }
+    if (node.type !== 'COMPONENT' && node.type !== 'COMPONENT_SET') {
+      var notComponent = new Error('Node ' + params.componentId + ' is a ' + node.type + ', not a COMPONENT or COMPONENT_SET.');
+      notComponent.code = 'NOT_A_COMPONENT';
+      throw notComponent;
+    }
+  } else {
+    var missing = new Error('Pass componentKey (a library component or set) or componentId (a component in this file).');
+    missing.code = 'INVALID_PARAMS';
+    throw missing;
+  }
+
+  if (node.type === 'COMPONENT_SET') {
+    var variant = node.defaultVariant || node.children[0];
+    if (!variant) {
+      var empty = new Error('Component set "' + node.name + '" has no variants.');
+      empty.code = 'INVALID_PARAMS';
+      throw empty;
+    }
+    return variant;
+  }
+  return node;
+}
+
+/** Fail before creating anything when an insertion index is out of range. */
+function assertInsertIndex(parent, index) {
+  if (index === undefined || index === null) return;
+  var count = parent.children.length;
+  if (!(Number.isInteger(index) && index >= 0 && index <= count)) {
+    var err = new Error('index ' + index + ' is out of range for parent ' + parent.id + ', which has ' + count +
+      ' children: pass 0–' + count + ' (0 is the back of the layer stack, ' + count + ' adds to the front).');
+    err.code = 'INVALID_PARAMS';
+    throw err;
+  }
+}
+
+/**
+ * Add a NEW node to a parent, at `index` among its children when given.
+ * Only for nodes not already in the parent: moving an existing child goes
+ * through reorderNode (constraint 13).
+ */
+function insertIntoParent(parent, node, index) {
+  if (index === undefined || index === null) {
+    parent.appendChild(node);
+  } else {
+    parent.insertChild(index, node);
+  }
+}
+
+/** The response for a created or swapped-in instance. */
+async function describeCreatedInstance(instance, extra) {
+  var main = await instance.getMainComponentAsync();
+  return Object.assign({
+    success: true,
+    nodeId: instance.id,
+    node: serializeNode(instance, 'full'),
+    mainComponentId: main ? main.id : null,
+    mainComponentName: main ? main.name : null,
+    mainComponent: main ? describeMainComponent(main) : null,
+    componentProperties: flattenComponentProperties(instance.componentProperties)
+  }, extra || {});
+}
+
+/**
+ * Import a team-library component or component set by key.
+ * @param {Object} params - { key, kind, includeVariants }
+ */
+async function importLibraryComponent(params) {
+  var node = await importLibraryComponentByKey(params.key, params.kind);
+  return Object.assign(
+    { success: true, nodeId: node.id },
+    describeLibraryComponent(node, params.includeVariants !== false)
+  );
+}
+
+/**
+ * Import team-library styles by key, in parallel. Each key succeeds or fails
+ * on its own; any failure makes the whole call success: false.
+ * @param {Object} params - { keys }
+ */
+async function importLibraryStyles(params) {
+  var outcomes = await Promise.all(params.keys.map(function(key) {
+    return figma.importStyleByKeyAsync(key).then(
+      function(style) {
+        return { style: { key: key, id: style.id, name: style.name, type: style.type, remote: style.remote } };
+      },
+      function(e) {
+        return {
+          error: {
+            key: key,
+            code: 'LIBRARY_IMPORT_FAILED',
+            message: 'No published library style with key "' + key + '" could be imported: ' + thrownMessage(e) +
+              '. The key must belong to a style published from a team library this account can open.'
+          }
+        };
+      }
+    );
+  }));
+
+  var styles = [];
+  var errors = [];
+  for (var i = 0; i < outcomes.length; i++) {
+    if (outcomes[i].style) styles.push(outcomes[i].style);
+    else errors.push(outcomes[i].error);
+  }
+  var result = { success: errors.length === 0, styles: styles };
+  if (errors.length > 0) result.errors = errors;
+  return result;
+}
+
+/**
+ * Set component properties (variants, text, boolean, instance swap) on an
+ * existing instance, verified by readback.
+ * @param {Object} params - { instanceId, properties }
+ */
+async function setInstanceProperties(params) {
+  var instance = await resolveNodeById(params.instanceId);
+  if (!instance) {
+    var notFound = new Error(describeUnresolvedId(params.instanceId));
+    notFound.code = 'NODE_NOT_FOUND';
+    throw notFound;
+  }
+  if (instance.type !== 'INSTANCE') {
+    var notInstance = new Error('Node ' + params.instanceId + ' is a ' + instance.type + ', not an INSTANCE.');
+    notInstance.code = 'NOT_AN_INSTANCE';
+    throw notInstance;
+  }
+
+  var applied = await applyInstanceProperties(instance, params.properties);
+  var main = await instance.getMainComponentAsync();
+  return {
+    success: true,
+    instanceId: instance.id,
+    applied: applied,
+    mainComponent: main ? describeMainComponent(main) : null,
+    componentProperties: flattenComponentProperties(instance.componentProperties),
+    width: instance.width,
+    height: instance.height
+  };
+}
+
+/** True when `ancestor` contains `node` at any depth. */
+function isAncestorOf(ancestor, node) {
+  for (var current = node.parent; current; current = current.parent) {
+    if (current === ancestor || current.id === ancestor.id) return true;
+  }
+  return false;
+}
+
+/**
+ * The text a hand-made control shows: its own characters for a TEXT node,
+ * else its first TEXT descendant's, in layer order.
+ * @returns {{ text: string, sourceId: string, textNodeCount: number } | null}
+ */
+function readControlText(node) {
+  if (node.type === 'TEXT') return { text: node.characters, sourceId: node.id, textNodeCount: 1 };
+  if (typeof node.findAll !== 'function') return null;
+  var texts = node.findAll(function(n) { return n.type === 'TEXT'; });
+  if (texts.length === 0) return null;
+  return { text: texts[0].characters, sourceId: texts[0].id, textNodeCount: texts.length };
+}
+
+/**
+ * Give a replacement instance the target's place in its parent: x/y and
+ * constraints outside auto-layout (or when absolute), FILL sizing inside it.
+ * HUG and FIXED sizing are left to the component unless matchSize is set,
+ * because the component's own size is usually the point of the swap.
+ */
+function placeLike(instance, target, parent, matchSize) {
+  var inAutoLayout = 'layoutMode' in parent && parent.layoutMode !== 'NONE';
+  var absolute = 'layoutPositioning' in target && target.layoutPositioning === 'ABSOLUTE';
+  var fillH = inAutoLayout && !absolute && target.layoutSizingHorizontal === 'FILL';
+  var fillV = inAutoLayout && !absolute && target.layoutSizingVertical === 'FILL';
+
+  if (inAutoLayout && absolute) instance.layoutPositioning = 'ABSOLUTE';
+  if (!inAutoLayout || absolute) {
+    instance.x = target.x;
+    instance.y = target.y;
+    if ('constraints' in target && target.constraints) instance.constraints = clone(target.constraints);
+  }
+  if (matchSize) {
+    instance.resize(fillH ? instance.width : target.width, fillV ? instance.height : target.height);
+  }
+  if (fillH) instance.layoutSizingHorizontal = 'FILL';
+  if (fillV) instance.layoutSizingVertical = 'FILL';
+}
+
+/**
+ * Replace a node (typically a hand-made control) with an instance of a
+ * component, in the same parent, at the same index and place. With
+ * textProperty, the target's text is copied into that TEXT property.
+ * The target is removed only after the instance is fully set up; any earlier
+ * failure removes the instance and leaves the target untouched.
+ * @param {Object} params - { targetId, componentKey | componentId, properties, textProperty, name, matchSize }
+ */
+async function replaceWithInstance(params) {
+  var target = await resolveNodeById(params.targetId);
+  if (!target) {
+    var notFound = new Error(describeUnresolvedId(params.targetId));
+    notFound.code = 'NODE_NOT_FOUND';
+    throw notFound;
+  }
+  var parent = target.parent;
+  if (!parent || target.type === 'PAGE' || target.type === 'DOCUMENT') {
+    var notReplaceable = new Error('Node ' + target.id + ' (' + target.type + ') cannot be replaced: only layers on a page can.');
+    notReplaceable.code = 'INVALID_PARAMS';
+    throw notReplaceable;
+  }
+  assertNotInstanceSublayer(target, 'Replacing a node', 'Replace it on the component master instead.');
+  if (target.type === 'COMPONENT' || target.type === 'COMPONENT_SET') {
+    var isMaster = new Error('Node ' + target.id + ' ("' + target.name + '") is a ' + target.type + ': deleting it ' +
+      'would detach every instance of it. Replace its instances instead, or delete it with figma_delete_nodes.');
+    isMaster.code = 'INVALID_PARAMS';
+    throw isMaster;
+  }
+  // dynamic-page: a page's children are readable only once it is loaded.
+  if (parent.type === 'PAGE' && typeof parent.loadAsync === 'function') {
+    await parent.loadAsync();
+  }
+
+  var properties = Object.assign({}, params.properties || {});
+  var copied = null;
+  var warnings = [];
+  if (params.textProperty) {
+    copied = readControlText(target);
+    if (!copied) {
+      var noText = new Error('textProperty "' + params.textProperty + '" was given, but ' + target.id +
+        ' ("' + target.name + '") holds no text to copy. Omit textProperty, or set the text in properties.');
+      noText.code = 'INVALID_PARAMS';
+      throw noText;
+    }
+    if (Object.prototype.hasOwnProperty.call(properties, params.textProperty)) {
+      warnings.push('properties already sets "' + params.textProperty + '", so the target\'s text was not copied.');
+      copied = null;
+    } else {
+      properties[params.textProperty] = copied.text;
+      if (copied.textNodeCount > 1) {
+        warnings.push('The target holds ' + copied.textNodeCount + ' text layers; the first ("' + copied.text +
+          '") was copied. Set any other text through properties.');
+      }
+    }
+  }
+
+  var component = await resolveComponentSource(params);
+  if (isAncestorOf(target, component)) {
+    var inside = new Error('Component "' + component.name + '" (' + component.id + ') is inside ' + target.id +
+      ', so removing the target would delete the instance\'s own main component.');
+    inside.code = 'INVALID_PARAMS';
+    throw inside;
+  }
+  var index = parent.children.indexOf(target);
+  var instance = component.createInstance();
+  try {
+    insertIntoParent(parent, instance, index);
+    if (params.name) instance.name = params.name;
+    // Properties first: a variant change can resize the instance.
+    if (Object.keys(properties).length > 0) await applyInstanceProperties(instance, properties);
+    placeLike(instance, target, parent, params.matchSize);
+  } catch (e) {
+    instance.remove();
+    throw e;
+  }
+
+  var replacedId = target.id;
+  var replacedName = target.name;
+  target.remove();
+
+  var extra = { replacedId: replacedId, replacedName: replacedName };
+  if (copied) extra.copiedText = { property: params.textProperty, text: copied.text, fromNodeId: copied.sourceId };
+  if (warnings.length > 0) extra.warnings = warnings;
+  return describeCreatedInstance(instance, extra);
+}
+
+// ------------------------------------------------------------
+// Read-side component and style details
+// ------------------------------------------------------------
+
+/** A TEXT node's textStyleId: the id, 'MIXED' across ranges, or null when unstyled. */
+function readTextStyleId(node) {
+  var id = node.textStyleId;
+  if (typeof id === 'string') return id || null;
+  return id === figma.mixed ? 'MIXED' : null;
+}
+
+/**
+ * The fields serializeNode can read synchronously: an instance's flat
+ * componentProperties, a text node's textStyleId.
+ */
+function addComponentFields(target, node) {
+  if (node.type === 'INSTANCE') {
+    try {
+      target.componentProperties = flattenComponentProperties(node.componentProperties);
+    } catch (_) {
+      // An instance whose main component is gone has no readable properties.
+    }
+  } else if (node.type === 'TEXT') {
+    var styleId = readTextStyleId(node);
+    if (styleId) target.textStyleId = styleId;
+  }
+  return target;
+}
+
+/**
+ * Add the details that need an async lookup to a serialized node: an
+ * instance's mainComponent (getMainComponentAsync — the sync getter throws
+ * under dynamic-page) and a text node's style name. One level only: the main
+ * component and its set are described by id/name/key, never walked.
+ * `styleNames` caches style id → name lookup (a promise) across one read, so
+ * concurrent nodes with the same style share a single getStyleByIdAsync.
+ */
+async function addComponentDetails(target, node, styleNames) {
+  addComponentFields(target, node);
+  if (node.type === 'INSTANCE') {
+    try {
+      var main = await node.getMainComponentAsync();
+      target.mainComponent = main ? describeMainComponent(main) : null;
+    } catch (_) {
+      target.mainComponent = null;
+    }
+  } else if (target.textStyleId && target.textStyleId !== 'MIXED') {
+    var styleId = target.textStyleId;
+    if (!Object.prototype.hasOwnProperty.call(styleNames, styleId)) {
+      styleNames[styleId] = Promise.resolve().then(function() { return figma.getStyleByIdAsync(styleId); }).then(
+        function(style) { return style ? style.name : null; },
+        function() { return null; }
+      );
+    }
+    var styleName = await styleNames[styleId];
+    if (styleName) target.textStyleName = styleName;
+  }
+  return target;
+}
+
+/**
+ * How many nodes' async lookups one read runs at once. A page can hold
+ * hundreds of instances: one await after another adds up toward the bridge's
+ * 30s timeout, while firing them all at once floods Figma's main thread.
+ */
+var READ_DETAIL_BATCH = 50;
+
+/** Serialize nodes for a read, with addComponentDetails on each, in batches. */
+async function serializeForRead(nodes, serialize) {
+  var styleNames = {};
+  var results = [];
+  for (var start = 0; start < nodes.length; start += READ_DETAIL_BATCH) {
+    var batch = nodes.slice(start, start + READ_DETAIL_BATCH);
+    var described = await Promise.all(batch.map(function(node) {
+      return addComponentDetails(serialize(node), node, styleNames);
+    }));
+    for (var i = 0; i < described.length; i++) results.push(described[i]);
+  }
+  return results;
 }
 
 // ============================================================

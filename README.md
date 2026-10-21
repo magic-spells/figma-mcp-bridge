@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server that enables Claude to read and manipulate
 
 ## Features
 
-- **94 operations** - 69 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
+- **98 operations** - 73 Figma design tools + 21 FigJam tools (sticky notes, flowchart shapes, connectors, tables, code blocks, link previews) + 4 Prototype tools (reactions, flow starting points)
 - **Works in both editors, plus read-only Dev Mode** - Auto-detects whether you're in a Figma design file or FigJam, and gates editor-specific commands accordingly (FigJam-only sticky/connector/table tools; Figma-Design-only prototype tools). In Dev Mode the plugin runs read-only — see [Dev Mode support](#dev-mode-support)
 - **Real-time bidirectional communication** - Changes appear instantly in Figma/FigJam
 - **Token-optimized queries** - Efficient variable search and node traversal for AI interactions
@@ -160,6 +160,8 @@ Get detailed information about specific nodes by their IDs.
 
 `full` includes `boundVariables`, `explicitVariableModes`, `layoutWrap`, `counterAxisSpacing`, `clipsContent` and per-side stroke weights.
 
+`compact` and `full` also describe components and text styles. An `INSTANCE` carries `mainComponent` (`id`, `name`, `key`, `remote`, and `parentSet` `{ id, name, key }` when it is a variant) and `componentProperties` as `{ name: value }`; a `TEXT` node carries `textStyleId` (`"MIXED"` across ranges) and `textStyleName`. `figma_get_children` and `figma_search_nodes` add the same fields.
+
 Composite instance-sublayer IDs (`I<instanceId>;<childId>`) resolve reliably — if the direct lookup misses, the instance root is resolved and its subtree searched. IDs that genuinely don't exist are returned in `notFound`, with an explanation in `notFoundDetails`.
 
 #### `figma_get_local_styles`
@@ -186,7 +188,7 @@ Get immediate children of a node. Efficient for browsing hierarchy one level at 
 | `parentId` | string | Yes | | Node ID to get children of |
 | `compact` | boolean | No | `true` | Return minimal data: `id`, `name`, `type`, `x`, `y`, `parentId`, `childCount` |
 
-Compact results include `x`/`y`, so they can be used to measure layout (for example, which children share a row after wrapping) without dropping to the full serialization.
+Compact results include `x`/`y`, so they can be used to measure layout (for example, which children share a row after wrapping) without dropping to the full serialization. Instances carry `mainComponent` and `componentProperties`, and text nodes `textStyleId` / `textStyleName`, as in `figma_get_nodes`.
 
 #### `figma_search_nodes`
 Search for nodes by name within a scope. **Preferred for finding specific frames, sections, or elements.**
@@ -213,6 +215,8 @@ Search local components by name. Use when looking for specific components like "
 | `includeVariants` | boolean | No | `false` | Include individual variants from component sets |
 | `compact` | boolean | No | `true` | Return minimal data |
 | `limit` | number | No | `50` | Maximum results |
+
+Compact results include each component's `key`. This searches the open file only; for a team-library component use `figma_import_library_component`.
 
 #### `figma_search_styles`
 Search local styles by name. More efficient than `figma_get_local_styles` when looking for specific styles.
@@ -364,15 +368,20 @@ Create a reusable component.
 | `description` | string | No | | Component description |
 
 #### `figma_create_instance`
-Create an instance of a component.
+Create an instance of a component in the file, or of a published team-library component imported by key. A component set instantiates its default variant; `properties` picks another and sets text, boolean and instance-swap properties in the same call (see `figma_set_instance_properties`). The parent and component are resolved first, and the instance is removed if a later step fails.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `componentId` | string | Yes | Component ID to instantiate |
-| `x` | number | No | X position |
-| `y` | number | No | Y position |
-| `parentId` | string | No | Parent node ID |
+| `componentId` | string | One of | COMPONENT or COMPONENT_SET ID in this file |
+| `componentKey` | string | One of | Published library component or component set key |
+| `properties` | object | No | `{ name: value }`, e.g. `{ "Variant": "Primary", "Size": "default", "Label": "Save" }` |
+| `x` | number | No | X position (ignored inside auto-layout) |
+| `y` | number | No | Y position (ignored inside auto-layout) |
+| `parentId` | string | No | Parent node ID (defaults to current page) |
+| `index` | number | No | Position among the parent's children (0 = back / first in auto-layout); omit to add at the end |
 | `name` | string | No | Instance name |
+
+The response carries `nodeId`, `mainComponent` and the resulting `componentProperties`.
 
 ---
 
@@ -474,7 +483,7 @@ Set effects (shadows, blurs).
 ```
 
 #### `figma_apply_style`
-Apply a local style to a node.
+Apply a style to a node: a local style, or a library style once `figma_import_library_style` has returned its local id.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -715,6 +724,50 @@ Swap a component instance to use a different component.
 |-----------|------|----------|-------------|
 | `instanceId` | string | Yes | Instance node ID to swap |
 | `newComponentId` | string | Yes | Component ID to swap to |
+
+#### `figma_import_library_component`
+Import a component or component set published from a team library, by key. Returns the imported `nodeId` (usable as `componentId` anywhere), `name`, `key`, `remote` and `componentPropertyDefinitions` — each property's `type` (`VARIANT`, `TEXT`, `BOOLEAN`, `INSTANCE_SWAP`), `defaultValue` and `variantOptions`. A set also returns `defaultVariant`, `variantCount` and `variants` (`id`, `name`, `key`, `variantProperties`); a variant returns its `variantProperties` and `parentSet`. A key that is not a published library component fails with `LIBRARY_IMPORT_FAILED`.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `key` | string | Yes | | Component or component set key |
+| `kind` | string | No | `auto` | `auto` (tries a set, then a component), `component` or `componentSet` |
+| `includeVariants` | boolean | No | `true` | List each variant of a set |
+
+An existing instance's keys are in its `figma_get_nodes` read: `mainComponent.key` and `mainComponent.parentSet.key`.
+
+#### `figma_import_library_style`
+Import published text, paint, effect or grid styles by key. Returns each style's local `id` for `figma_apply_style`, with `name`, `type` and `key`. Keys import in parallel; any that fail are listed in `errors` (`LIBRARY_IMPORT_FAILED`) and make the call an error, with the imported styles still listed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | string | One of | One style key |
+| `keys` | string[] | One of | Several style keys (at most 50) |
+
+#### `figma_set_instance_properties`
+Set component properties on an instance: variants, `TEXT`, `BOOLEAN`, and `INSTANCE_SWAP` (by component ID or library component key). Figma suffixes non-variant property names with `#id` (`Label#12:0`); the base name works when unambiguous. Names and values are checked against the main component's definitions first, so a typo fails with `INVALID_PROPERTIES` listing the valid choices, and every value is verified by readback (`PROPERTIES_NOT_APPLIED`).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `instanceId` | string | Yes | Instance node ID |
+| `properties` | object | Yes | `{ name: string \| boolean }`, e.g. `{ "Variant": "Secondary", "Label": "Cancel", "Show icon": true }` |
+
+Returns `applied` (full names), `mainComponent` (which follows the variant), `componentProperties`, `width` and `height`.
+
+#### `figma_replace_with_instance`
+Replace a node — typically a hand-made control — with an instance, in the same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes the target's `x`/`y` and constraints; inside auto-layout it takes `FILL` on any axis the target filled. Hug/fixed sizes come from the component unless `matchSize` is set. The target is deleted only after the instance is fully set up; on any failure the instance is removed and the target is left as it was. A component or component set cannot be the target (deleting it would detach its instances).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `targetId` | string | Yes | Node to replace |
+| `componentId` | string | One of | Component or set ID in this file |
+| `componentKey` | string | One of | Published library component or set key |
+| `properties` | object | No | Component properties, as in `figma_set_instance_properties` |
+| `textProperty` | string | No | TEXT property that receives the target's text (its own, or its first text layer's); an explicit value in `properties` wins |
+| `matchSize` | boolean | No | Resize to the target's width/height (filled axes stay `FILL`) |
+| `name` | string | No | Instance name |
+
+Returns `nodeId`, `replacedId`, `copiedText`, `mainComponent` and `componentProperties`.
 
 #### `figma_combine_as_variants`
 Combine multiple components into a component set with variants.
