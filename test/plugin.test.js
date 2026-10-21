@@ -37,6 +37,7 @@ class FakeNode {
     this.width = width;
     this.height = height;
     this.opacity = opacity;
+    this.rotation = 0;
     if (fills !== undefined) this.fills = fills;
     if (strokes !== undefined) this.strokes = strokes;
     if (strokeWeight !== undefined) this.strokeWeight = strokeWeight;
@@ -45,6 +46,11 @@ class FakeNode {
   remove() {
     if (this.parent) this.parent.detach(this);
     this.removed = true;
+  }
+
+  // Binds a variable to a node field (visible, opacity, …), as an alias.
+  setBoundVariable(field, variable) {
+    this.boundVariables = { ...(this.boundVariables || {}), [field]: { type: 'VARIABLE_ALIAS', id: variable.id } };
   }
 }
 
@@ -147,14 +153,21 @@ class FakeText extends FakeNode {
  * A component; a variant when it sits in a FakeComponentSet. As in Figma, a
  * variant has variantProperties and reading its componentPropertyDefinitions
  * throws (the set holds them).
+ *
+ * `textLayers` are the text layers its instances get: { name, characters,
+ * ref, live }. `ref` names the TEXT property the layer's characters are bound
+ * to (componentPropertyReferences.characters), or null for an unbound layer;
+ * a bound layer shows the property's value unless `live` is false, which
+ * models a layer that stopped following its property.
  */
 class FakeComponent extends FakeContainer {
-  constructor({ key, remote = true, variantProperties = null, definitions = {}, ...props } = {}) {
+  constructor({ key, remote = true, variantProperties = null, definitions = {}, textLayers = [], ...props } = {}) {
     super('COMPONENT', { width: 80, height: 32, ...props });
     this.key = key;
     this.remote = remote;
     this.variantProperties = variantProperties;
     this.ownDefinitions = definitions;
+    this.textLayers = textLayers;
   }
 
   get componentPropertyDefinitions() {
@@ -194,6 +207,20 @@ class FakeInstance extends FakeContainer {
     this.main = main;
     this.overrides = {};
     this.ignore = ignore;
+    this.buildLayers();
+  }
+
+  // The main component's text layers, rebuilt when the variant changes.
+  buildLayers() {
+    for (const child of this.children.slice()) child.remove();
+    for (const layer of (this.main && this.main.textLayers) || []) {
+      const text = new FakeText({ name: layer.name, characters: layer.characters });
+      text.componentPropertyReferences = layer.ref ? { characters: layer.ref } : null;
+      if (layer.ref && layer.live !== false) {
+        Object.defineProperty(text, 'characters', { get: () => this.componentProperties[layer.ref].value });
+      }
+      FakeContainer.prototype.appendChild.call(this, text);
+    }
   }
 
   appendChild() {
@@ -234,9 +261,12 @@ class FakeInstance extends FakeContainer {
       const match = set.children.find((variant) =>
         Object.entries(variantValues).every(([name, value]) => variant.variantProperties[name] === value));
       if (!match) throw new Error('No variant matches ' + JSON.stringify(variantValues));
-      this.main = match;
-      this.width = match.width;
-      this.height = match.height;
+      if (match !== this.main) {
+        this.main = match;
+        this.width = match.width;
+        this.height = match.height;
+        this.buildLayers();
+      }
     }
   }
 
@@ -254,17 +284,29 @@ const BUTTON_DEFINITIONS = {
   'Icon#4:2': { type: 'INSTANCE_SWAP', defaultValue: '9:1' }
 };
 
-/** A published Button set: Variant × Size, with label, icon toggle and icon swap. */
-function buttonSet() {
+/**
+ * A published Button set: Variant × Size, with label, icon toggle and icon
+ * swap. Each variant's "Label" text layer is bound to Label#12:0, except in
+ * the variants named in `unbound` ("Secondary-sm"), whose layer just says
+ * "Button", and in `stale`, whose layer is bound but does not follow it.
+ */
+function buttonSet({ unbound = [], stale = [] } = {}) {
   const variants = [];
   for (const variant of ['Primary', 'Secondary']) {
     for (const size of ['default', 'sm']) {
+      const id = `${variant}-${size}`;
       variants.push(new FakeComponent({
         name: `Variant=${variant}, Size=${size}`,
         key: `key-${variant}-${size}`,
         variantProperties: { Variant: variant, Size: size },
         width: size === 'sm' ? 64 : 80,
-        height: size === 'sm' ? 28 : 36
+        height: size === 'sm' ? 28 : 36,
+        textLayers: [{
+          name: 'Label',
+          characters: 'Button',
+          ref: unbound.includes(id) ? null : 'Label#12:0',
+          live: !stale.includes(id)
+        }]
       }));
     }
   }
@@ -336,6 +378,11 @@ function fakeFigma({ importSvg = () => svgFrame(), pages = [], library = {} } = 
     importComponentSetByKeyAsync: (key) => importFrom(componentSets, key, 'component set'),
     importComponentByKeyAsync: (key) => importFrom(components, key, 'component'),
     importStyleByKeyAsync: (key) => importFrom(styles, key, 'style'),
+    variables: {
+      async getVariableByIdAsync(id) {
+        return (library.variables || {})[id] || null;
+      }
+    },
     async getStyleByIdAsync(id) {
       return Object.values(styles).find((style) => style.id === id) || null;
     },
@@ -635,9 +682,12 @@ describe('create_svg', () => {
 // Library components, styles and instance properties
 // ------------------------------------------------------------
 
-/** A fake file with the Button set published under its key and each variant's. */
-function libraryFigma(extra = {}) {
-  const set = buttonSet();
+/**
+ * A fake file with the Button set published under its key and each variant's.
+ * `extra` adds library entries (styles, variables); `setOptions` go to buttonSet.
+ */
+function libraryFigma(extra = {}, setOptions = {}) {
+  const set = buttonSet(setOptions);
   const components = {};
   for (const variant of set.children) components[variant.key] = variant;
   const figma = fakeFigma({ library: { componentSets: { [set.key]: set }, components, ...extra } });
@@ -645,10 +695,10 @@ function libraryFigma(extra = {}) {
 }
 
 describe('import_library_component', () => {
-  test('a set key returns its property definitions and every variant', async () => {
+  test('a set key with includeVariants returns its property definitions and every variant', async () => {
     const { figma, set } = libraryFigma();
     loadPlugin(figma);
-    const result = await sendCommand(figma, 'import_library_component', { key: set.key });
+    const result = await sendCommand(figma, 'import_library_component', { key: set.key, includeVariants: true });
 
     assert.equal(result.success, true);
     assert.equal(result.nodeId, set.id);
@@ -678,12 +728,15 @@ describe('import_library_component', () => {
     assert.deepEqual(Object.keys(result.componentPropertyDefinitions), Object.keys(BUTTON_DEFINITIONS));
   });
 
-  test('includeVariants: false leaves the variant list out', async () => {
+  test('by default the variant list is left out: the definitions are enough to pick a variant', async () => {
     const { figma, set } = libraryFigma();
     loadPlugin(figma);
-    const result = await sendCommand(figma, 'import_library_component', { key: set.key, includeVariants: false });
-    assert.equal(result.variants, undefined);
-    assert.equal(result.variantCount, 4);
+    for (const payload of [{ key: set.key }, { key: set.key, includeVariants: false }]) {
+      const result = await sendCommand(figma, 'import_library_component', payload);
+      assert.equal(result.variants, undefined, JSON.stringify(payload));
+      assert.equal(result.variantCount, 4);
+      assert.deepEqual(result.componentPropertyDefinitions.Size.variantOptions, ['default', 'sm']);
+    }
   });
 
   test('an unpublished key fails with LIBRARY_IMPORT_FAILED after both attempts', async () => {
@@ -744,6 +797,59 @@ describe('create_instance', () => {
     assert.deepEqual(result.componentProperties, {
       Variant: 'Secondary', Size: 'sm', 'Label#12:0': 'Save', 'Show icon#3:1': true, 'Icon#4:2': '9:1'
     });
+  });
+
+  test('the response is compact by default; compact: false returns the full node', async () => {
+    const { figma, set } = libraryFigma();
+    loadPlugin(figma);
+    const compact = await sendCommand(figma, 'create_instance', { componentKey: set.key, x: 8, y: 4 });
+
+    assert.equal(compact.success, true, JSON.stringify(compact.error));
+    assert.deepEqual(compact.node, {
+      id: compact.nodeId,
+      name: 'Variant=Primary, Size=default',
+      type: 'INSTANCE',
+      parentId: figma.currentPage.id,
+      x: 8,
+      y: 4,
+      width: 80,
+      height: 36,
+      visible: true,
+      locked: false
+    });
+    assert.equal(compact.mainComponent.parentSet.name, 'Button');
+    assert.equal(compact.componentProperties['Label#12:0'], 'Button');
+
+    const full = await sendCommand(figma, 'create_instance', { componentKey: set.key, compact: false });
+    assert.equal(full.node.pageId, figma.currentPage.id, 'the full serialization');
+    assert.equal(full.node.rotation, 0);
+  });
+
+  test('a TEXT property whose text layer is not bound to it succeeds with TEXT_PROPERTY_UNBOUND', async () => {
+    const { figma, set } = libraryFigma({}, { unbound: ['Secondary-sm'] });
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', {
+      componentKey: set.key, properties: { Variant: 'Secondary', Size: 'sm', Label: 'Save' }
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(result.componentProperties['Label#12:0'], 'Save', 'the property itself reads back');
+    const instance = figma.currentPage.children[0];
+    assert.equal(instance.children[0].characters, 'Button', 'but the layer still shows the default');
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /^TEXT_PROPERTY_UNBOUND: /);
+    assert.match(result.warnings[0], /"Label#12:0"/);
+    assert.match(result.warnings[0], /variant "Variant=Secondary, Size=sm" of "Button"/);
+  });
+
+  test('a TEXT property its layer shows comes back without warnings', async () => {
+    const { figma, set } = libraryFigma({}, { unbound: ['Secondary-sm'] });
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'create_instance', { componentKey: set.key, properties: { Label: 'Save' } });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(figma.currentPage.children[0].children[0].characters, 'Save');
+    assert.equal(result.warnings, undefined);
   });
 
   test('a local component set by id instantiates its default variant', async () => {
@@ -817,6 +923,45 @@ describe('set_instance_properties', () => {
     assert.equal(result.componentProperties.Size, 'sm');
     assert.equal(result.componentProperties['Label#12:0'], 'Cancel');
     assert.deepEqual([result.width, result.height], [64, 28]);
+  });
+
+  test('checks the text layers bound to a TEXT property show its value', async () => {
+    const { figma, set } = libraryFigma({}, { unbound: ['Primary-sm'], stale: ['Secondary-default'] });
+    const instance = new FakeInstance(set.children[0]);
+    figma.currentPage.appendChild(instance);
+    loadPlugin(figma);
+
+    const shown = await sendCommand(figma, 'set_instance_properties', { instanceId: instance.id, properties: { Label: 'Cancel' } });
+    assert.equal(shown.success, true, JSON.stringify(shown.error));
+    assert.equal(shown.warnings, undefined);
+    assert.equal(instance.children[0].characters, 'Cancel');
+
+    const unbound = await sendCommand(figma, 'set_instance_properties', {
+      instanceId: instance.id, properties: { Size: 'sm', Label: 'Close' }
+    });
+    assert.equal(unbound.success, true, JSON.stringify(unbound.error));
+    assert.equal(unbound.warnings.length, 1);
+    assert.match(unbound.warnings[0], /^TEXT_PROPERTY_UNBOUND: .*variant "Variant=Primary, Size=sm" of "Button"/);
+
+    const stale = await sendCommand(figma, 'set_instance_properties', {
+      instanceId: instance.id, properties: { Variant: 'Secondary', Size: 'default', Label: 'Done' }
+    });
+    assert.equal(stale.success, true, JSON.stringify(stale.error));
+    assert.equal(stale.warnings.length, 1);
+    assert.match(stale.warnings[0], /^TEXT_PROPERTY_NOT_RENDERED: /);
+    assert.match(stale.warnings[0], /"Label" shows "Button"/);
+  });
+
+  test('only TEXT properties are checked against text layers', async () => {
+    const { figma, set } = libraryFigma({}, { unbound: ['Primary-sm'] });
+    const instance = new FakeInstance(set.children[0]);
+    figma.currentPage.appendChild(instance);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'set_instance_properties', {
+      instanceId: instance.id, properties: { Size: 'sm', 'Show icon#3:1': true }
+    });
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(result.warnings, undefined);
   });
 
   test('a boolean stands for a "true"/"false" variant option', () => {
@@ -897,6 +1042,85 @@ describe('replace_with_instance', () => {
     assert.equal(result.componentProperties.Variant, 'Secondary');
     assert.equal(result.copiedText.text, 'Save');
     assert.equal(result.warnings, undefined);
+  });
+
+  test('keeps the target\'s visibility, lock, opacity, rotation and name', async () => {
+    const { figma, set } = libraryFigma();
+    const card = new FakeFrame({ name: 'Card', width: 300, height: 200 });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    target.visible = false;
+    target.locked = true;
+    target.opacity = 0.5;
+    target.rotation = 90;
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', { targetId: target.id, componentKey: set.key });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    const instance = card.children[1];
+    assert.equal(instance.visible, false, 'a hidden target stays hidden');
+    assert.equal(instance.locked, true);
+    assert.equal(instance.opacity, 0.5);
+    assert.equal(instance.rotation, 90);
+    assert.equal(instance.name, 'Save button', 'the target\'s name when none is given');
+    assert.equal(result.node.visible, false);
+    assert.equal(result.node.name, 'Save button');
+  });
+
+  test('a name given wins over the target\'s; variables bound to visible and opacity are carried', async () => {
+    const showSave = { id: 'VariableID:1:1', name: 'show-save' };
+    const { figma, set } = libraryFigma({ variables: { [showSave.id]: showSave } });
+    const card = new FakeFrame({ name: 'Card' });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    target.boundVariables = {
+      visible: { type: 'VARIABLE_ALIAS', id: showSave.id },
+      opacity: { type: 'VARIABLE_ALIAS', id: 'VariableID:gone' }
+    };
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: target.id, componentKey: set.key, name: 'Save'
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    const instance = card.children[1];
+    assert.equal(instance.name, 'Save');
+    assert.deepEqual(instance.boundVariables, { visible: { type: 'VARIABLE_ALIAS', id: showSave.id } });
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /opacity.*VariableID:gone/);
+  });
+
+  test('the response is compact by default; compact: false returns the full node', async () => {
+    const { figma, set } = libraryFigma();
+    const card = new FakeFrame({ name: 'Card' });
+    figma.currentPage.appendChild(card);
+    const first = handMadeButton(card);
+    loadPlugin(figma);
+    const compact = await sendCommand(figma, 'replace_with_instance', { targetId: first.id, componentKey: set.key });
+    assert.equal(compact.success, true, JSON.stringify(compact.error));
+    assert.equal(compact.node.pageId, undefined);
+    assert.deepEqual([compact.node.x, compact.node.y, compact.node.width, compact.node.height], [40, 12, 80, 36]);
+
+    const second = handMadeButton(card);
+    const full = await sendCommand(figma, 'replace_with_instance', { targetId: second.id, componentKey: set.key, compact: false });
+    assert.equal(full.success, true, JSON.stringify(full.error));
+    assert.equal(full.node.pageId, figma.currentPage.id);
+  });
+
+  test('copied text that its layer does not show is reported', async () => {
+    const { figma, set } = libraryFigma({}, { unbound: ['Primary-default'] });
+    const card = new FakeFrame({ name: 'Card' });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: target.id, componentKey: set.key, textProperty: 'Label'
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(result.copiedText.text, 'Save');
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /^TEXT_PROPERTY_UNBOUND: /);
   });
 
   test('inside auto-layout, an axis the target filled stays FILL; matchSize sizes the rest', async () => {

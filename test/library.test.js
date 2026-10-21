@@ -232,9 +232,15 @@ describe('tool schemas', () => {
     assert.ok(!schema.safeParse({ componentId: '1:1', index: 1.5 }).success);
   });
 
-  test('figma_import_library_component defaults to auto with variants', () => {
+  test('figma_import_library_component defaults to auto without the variant list', () => {
     const parsed = tools.get('figma_import_library_component').parse({ key: SET_KEY });
-    assert.deepEqual(parsed, { key: SET_KEY, kind: 'auto', includeVariants: true });
+    assert.deepEqual(parsed, { key: SET_KEY, kind: 'auto', includeVariants: false });
+  });
+
+  test('figma_create_instance and figma_replace_with_instance answer compactly by default', () => {
+    assert.equal(tools.get('figma_create_instance').parse({ componentId: '1:1' }).compact, true);
+    assert.equal(tools.get('figma_replace_with_instance').parse({ targetId: '1:3', componentId: '1:1' }).compact, true);
+    assert.equal(tools.get('figma_create_instance').parse({ componentId: '1:1', compact: false }).compact, false);
   });
 
   test('figma_import_library_style caps keys', () => {

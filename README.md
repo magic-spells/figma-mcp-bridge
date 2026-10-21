@@ -380,8 +380,9 @@ Create an instance of a component in the file, or of a published team-library co
 | `parentId` | string | No | Parent node ID (defaults to current page) |
 | `index` | number | No | Position among the parent's children (0 = back / first in auto-layout); omit to add at the end |
 | `name` | string | No | Instance name |
+| `compact` | boolean | No | Default `true`: `node` is `id`, `name`, `type`, `parentId`, `x`, `y`, `width`, `height`, `visible`, `locked`. `false` returns the full node |
 
-The response carries `nodeId`, `mainComponent` and the resulting `componentProperties`.
+The response carries `nodeId`, `node`, `mainComponent` and the resulting `componentProperties`, plus `warnings` when a `TEXT` property is not shown by any text layer (see `figma_set_instance_properties`).
 
 ---
 
@@ -728,13 +729,13 @@ Swap a component instance to use a different component.
 | `newComponentId` | string | Yes | Component ID to swap to |
 
 #### `figma_import_library_component`
-Import a component or component set published from a team library, by key. Returns the imported `nodeId` (usable as `componentId` anywhere), `name`, `key`, `remote` and `componentPropertyDefinitions` — each property's `type` (`VARIANT`, `TEXT`, `BOOLEAN`, `INSTANCE_SWAP`), `defaultValue` and `variantOptions`. A set also returns `defaultVariant`, `variantCount` and `variants` (`id`, `name`, `key`, `variantProperties`); a variant returns its `variantProperties` and `parentSet`. A key that is not a published library component fails with `LIBRARY_IMPORT_FAILED`.
+Import a component or component set published from a team library, by key. Returns the imported `nodeId` (usable as `componentId` anywhere), `name`, `key`, `remote` and `componentPropertyDefinitions` — each property's `type` (`VARIANT`, `TEXT`, `BOOLEAN`, `INSTANCE_SWAP`), `defaultValue` and `variantOptions`. A set also returns `defaultVariant` and `variantCount`, and with `includeVariants` its `variants` (`id`, `name`, `key`, `variantProperties`) — off by default, since the property definitions already name every variant option and a large set lists hundreds; a variant returns its `variantProperties` and `parentSet`. A key that is not a published library component fails with `LIBRARY_IMPORT_FAILED`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `key` | string | Yes | | Component or component set key |
 | `kind` | string | No | `auto` | `auto` (tries a set, then a component), `component` or `componentSet` |
-| `includeVariants` | boolean | No | `true` | List each variant of a set |
+| `includeVariants` | boolean | No | `false` | List each variant of a set |
 
 An existing instance's keys are in its `figma_get_nodes` read: `mainComponent.key` and `mainComponent.parentSet.key`.
 
@@ -749,15 +750,17 @@ Import published text, paint, effect or grid styles by key. Returns each style's
 #### `figma_set_instance_properties`
 Set component properties on an instance: variants, `TEXT`, `BOOLEAN`, and `INSTANCE_SWAP` (by component ID or library component key). Figma suffixes non-variant property names with `#id` (`Label#12:0`); the base name works when unambiguous. Names and values are checked against the main component's definitions first, so a typo fails with `INVALID_PROPERTIES` listing the valid choices, and every value is verified by readback (`PROPERTIES_NOT_APPLIED`).
 
+`componentProperties` reads a `TEXT` value back even when nothing shows it: a variant can define the property without binding its text layer to it. So a `TEXT` value is also looked for in the text layers bound to it (`componentPropertyReferences.characters`). The call still succeeds, since the property is set, but `warnings` says what the canvas shows: `TEXT_PROPERTY_UNBOUND: …` names the variant whose text layer is not bound, and `TEXT_PROPERTY_NOT_RENDERED: …` names a bound layer showing other text. Both mean the component needs fixing.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `instanceId` | string | Yes | Instance node ID |
 | `properties` | object | Yes | `{ name: string \| boolean }`, e.g. `{ "Variant": "Secondary", "Label": "Cancel", "Show icon": true }` |
 
-Returns `applied` (full names), `mainComponent` (which follows the variant), `componentProperties`, `width` and `height`.
+Returns `applied` (full names), `mainComponent` (which follows the variant), `componentProperties`, `width`, `height` and any `warnings`.
 
 #### `figma_replace_with_instance`
-Replace a node — typically a hand-made control — with an instance, in the same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes the target's `x`/`y` and constraints; inside auto-layout it takes `FILL` on any axis the target filled. Hug/fixed sizes come from the component unless `matchSize` is set. The target is deleted only after the instance is fully set up; on any failure the instance is removed and the target is left as it was. A component or component set cannot be the target (deleting it would detach its instances).
+Replace a node — typically a hand-made control — with an instance, in the same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes the target's `x`/`y` and constraints; inside auto-layout it takes `FILL` on any axis the target filled. Hug/fixed sizes come from the component unless `matchSize` is set. The instance also keeps the target's rotation, visibility, lock and opacity (and a variable bound to `visible` or `opacity`), and its layer name unless `name` is given; fills, strokes, effects and blend mode are the component's. The target is deleted only after the instance is fully set up; on any failure the instance is removed and the target is left as it was. A component or component set cannot be the target (deleting it would detach its instances).
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -767,9 +770,10 @@ Replace a node — typically a hand-made control — with an instance, in the sa
 | `properties` | object | No | Component properties, as in `figma_set_instance_properties` |
 | `textProperty` | string | No | TEXT property that receives the target's text (its own, or its first text layer's); an explicit value in `properties` wins |
 | `matchSize` | boolean | No | Resize to the target's width/height (filled axes stay `FILL`) |
-| `name` | string | No | Instance name |
+| `name` | string | No | Instance name (defaults to the target's name) |
+| `compact` | boolean | No | Default `true`; `false` returns the full node, as in `figma_create_instance` |
 
-Returns `nodeId`, `replacedId`, `copiedText`, `mainComponent` and `componentProperties`.
+Returns `nodeId`, `node`, `replacedId`, `copiedText`, `mainComponent`, `componentProperties` and any `warnings` (text-layer checks as in `figma_set_instance_properties`, or a variable bind that could not be carried).
 
 #### `figma_combine_as_variants`
 Combine multiple components into a component set with variants.

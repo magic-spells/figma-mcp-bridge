@@ -192,6 +192,12 @@ const componentPropertiesSchema = z.record(z.string(), z.union([z.string(), z.bo
   'works when it is unambiguous. An unknown name or variant option fails with INVALID_PROPERTIES listing the choices.'
 );
 
+// figma_create_instance / figma_replace_with_instance answer with a compact node by default.
+const instanceCompactSchema = z.boolean().optional().default(true).describe(
+  'Return the instance compactly: id, name, type, parentId, x/y, width/height, visible, locked, plus mainComponent ' +
+  'and componentProperties. Set false for the full ~40-property node (or read it later with figma_get_nodes).'
+);
+
 /**
  * Register all tools with the MCP server
  * @param {McpServer} server - MCP Server instance
@@ -704,9 +710,11 @@ export function registerTools(server, bridge) {
     'component or component set (componentKey, imported on the fly — no figma_import_library_component call needed). ' +
     'A component set instantiates its default variant; pass properties to pick another variant and set text, ' +
     'boolean and instance-swap properties in the same call. Properties are verified by readback ' +
-    '(PROPERTIES_NOT_APPLIED otherwise). The parent and component are resolved first and the instance is removed if ' +
-    'a later step fails, so a failed call leaves nothing behind. The response carries mainComponent (with parentSet ' +
-    'for a variant) and the resulting componentProperties.',
+    '(PROPERTIES_NOT_APPLIED otherwise); a TEXT property no text layer shows comes back in warnings ' +
+    '(TEXT_PROPERTY_UNBOUND / TEXT_PROPERTY_NOT_RENDERED). The parent and component are resolved first and the ' +
+    'instance is removed if a later step fails, so a failed call leaves nothing behind. The response is compact by ' +
+    'default: the node\'s id, name, type, position, size and visibility, plus mainComponent (with parentSet for a ' +
+    'variant) and the resulting componentProperties; compact: false returns the full node.',
     {
       componentId: z.string().optional().describe('ID of a COMPONENT or COMPONENT_SET in this file (including one already imported from a library). Pass this or componentKey.'),
       componentKey: z.string().optional().describe('Key of a published team-library component or component set. Pass this or componentId.'),
@@ -715,7 +723,8 @@ export function registerTools(server, bridge) {
       y: z.number().optional().default(0).describe('Y position, relative to the parent (ignored inside auto-layout)'),
       parentId: z.string().optional().describe('Parent node ID (defaults to current page). A missing parent fails with NODE_NOT_FOUND.'),
       index: z.number().int().min(0).optional().describe('Position among the parent\'s children (0 = back of the layer stack, first in auto-layout order). Omit to add at the end.'),
-      name: z.string().optional().describe('Instance name (defaults to component name)')
+      name: z.string().optional().describe('Instance name (defaults to component name)'),
+      compact: instanceCompactSchema
     },
     async (args) => handleCreateInstance(bridge, args)
   );
@@ -725,15 +734,16 @@ export function registerTools(server, bridge) {
     'figma_import_library_component',
     'Import a component or component set published from a team library, by key, and describe it. Returns the ' +
     'imported node id (usable as componentId anywhere), name, key, remote, and componentPropertyDefinitions: each ' +
-    'property\'s type (VARIANT, TEXT, BOOLEAN, INSTANCE_SWAP), defaultValue and, for variants, variantOptions. A ' +
-    'component set also returns defaultVariant and each variant\'s id, key and variantProperties; a variant ' +
+    'property\'s type (VARIANT, TEXT, BOOLEAN, INSTANCE_SWAP), defaultValue and, for variants, variantOptions — ' +
+    'enough to pick a variant by its properties. A component set also returns defaultVariant and variantCount, and ' +
+    'with includeVariants each variant\'s id, key and variantProperties (a large set lists hundreds); a variant ' +
     'component returns its variantProperties and parentSet. A key that is not a published library component fails ' +
     'with LIBRARY_IMPORT_FAILED. Keys come from the library (e.g. figma_get_nodes on an existing instance: ' +
     'mainComponent.key / mainComponent.parentSet.key).',
     {
       key: z.string().describe('Component or component set key from the published library'),
       kind: z.enum(['auto', 'component', 'componentSet']).optional().default('auto').describe('Which the key is. "auto" tries a component set, then a component.'),
-      includeVariants: z.boolean().optional().default(true).describe('For a component set, list every variant\'s id, key and variantProperties')
+      includeVariants: z.boolean().optional().default(false).describe('For a component set, also list every variant\'s id, key and variantProperties. Off by default: componentPropertyDefinitions already name every variant option, and create/set calls pick variants by property.')
     },
     async (args) => handleImportLibraryComponent(bridge, args)
   );
@@ -1362,8 +1372,12 @@ export function registerTools(server, bridge) {
     'Set component properties on an instance: switch variants, set TEXT and BOOLEAN properties, and swap nested ' +
     'instances (INSTANCE_SWAP, by component id or library component key). Names and values are checked against the ' +
     'main component\'s definitions first, so an unknown name or variant option fails with INVALID_PROPERTIES listing ' +
-    'the valid choices. Every value is verified by readback (PROPERTIES_NOT_APPLIED otherwise). Returns the full ' +
-    'names applied, mainComponent (which changes with the variant) and the resulting componentProperties.',
+    'the valid choices. Every value is verified by readback (PROPERTIES_NOT_APPLIED otherwise). A TEXT value is ' +
+    'also looked for in the text layers bound to it (componentPropertyReferences): if the variant binds no layer to ' +
+    'the property, or a bound layer shows other text, the call still succeeds and says so in warnings ' +
+    '(TEXT_PROPERTY_UNBOUND / TEXT_PROPERTY_NOT_RENDERED) — the property is set, but the component needs fixing. ' +
+    'Returns the full names applied, mainComponent (which changes with the variant), the resulting ' +
+    'componentProperties and the instance\'s width/height.',
     {
       instanceId: z.string().describe('The INSTANCE node ID'),
       properties: componentPropertiesSchema
@@ -1377,11 +1391,14 @@ export function registerTools(server, bridge) {
     'Replace a node — typically a hand-made control — with an instance of a local or library component, in the ' +
     'same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes ' +
     'the target\'s x/y and constraints; inside auto-layout it takes FILL sizing on any axis the target filled. ' +
-    'HUG/FIXED sizes come from the component unless matchSize is set. textProperty copies the target\'s text (its ' +
-    'own, or its first text layer\'s) into that TEXT property. The target is deleted only after the instance is ' +
-    'fully set up; any failure removes the instance and leaves the target as it was. A component or component set ' +
-    'cannot be the target (deleting a master detaches its instances). Returns the new nodeId, ' +
-    'replacedId, copiedText and the instance\'s componentProperties.',
+    'HUG/FIXED sizes come from the component unless matchSize is set. The instance keeps the target\'s rotation, ' +
+    'visibility, lock, opacity (and any variable bound to visible or opacity) and its layer name unless name is ' +
+    'given; fills, strokes and effects come from the component. textProperty copies the target\'s text (its ' +
+    'own, or its first text layer\'s) into that TEXT property; a TEXT value no text layer shows is reported in ' +
+    'warnings (TEXT_PROPERTY_UNBOUND / TEXT_PROPERTY_NOT_RENDERED). The target is deleted only after the instance ' +
+    'is fully set up; any failure removes the instance and leaves the target as it was. A component or component ' +
+    'set cannot be the target (deleting a master detaches its instances). Returns the new nodeId, a compact node ' +
+    '(compact: false for the full one), replacedId, copiedText and the instance\'s componentProperties.',
     {
       targetId: z.string().describe('The node to replace'),
       componentId: z.string().optional().describe('ID of a COMPONENT or COMPONENT_SET in this file. Pass this or componentKey.'),
@@ -1389,7 +1406,8 @@ export function registerTools(server, bridge) {
       properties: componentPropertiesSchema.optional(),
       textProperty: z.string().optional().describe('TEXT property (e.g. "Label") to receive the target\'s text. An explicit value for it in properties wins.'),
       matchSize: z.boolean().optional().default(false).describe('Resize the instance to the target\'s width/height (axes the target filled stay FILL)'),
-      name: z.string().optional().describe('Instance name (defaults to component name)')
+      name: z.string().optional().describe('Instance name (defaults to the target\'s name)'),
+      compact: instanceCompactSchema
     },
     async (args) => handleReplaceWithInstance(bridge, args)
   );
