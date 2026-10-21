@@ -194,7 +194,7 @@ const componentPropertiesSchema = z.record(z.string(), z.union([z.string(), z.bo
 
 // figma_create_instance / figma_replace_with_instance answer with a compact node by default.
 const instanceCompactSchema = z.boolean().optional().default(true).describe(
-  'Return the instance compactly: id, name, type, parentId, x/y, width/height, visible, locked, plus mainComponent ' +
+  'Return the instance compactly: id, name, type, parentId, x/y, width/height, rotation, opacity, visible, locked, plus mainComponent ' +
   'and componentProperties. Set false for the full ~40-property node (or read it later with figma_get_nodes).'
 );
 
@@ -1392,8 +1392,9 @@ export function registerTools(server, bridge) {
     'same parent at the same layer index. Outside auto-layout (or when absolutely positioned) the instance takes ' +
     'the target\'s x/y and constraints; inside auto-layout it takes FILL sizing on any axis the target filled. ' +
     'HUG/FIXED sizes come from the component unless matchSize is set. The instance keeps the target\'s rotation, ' +
-    'visibility, lock, opacity (and any variable bound to visible or opacity) and its layer name unless name is ' +
-    'given; fills, strokes and effects come from the component. textProperty copies the target\'s text (its ' +
+    'visibility, lock, opacity (and any variable bound to visible or opacity, or a component property bound to its ' +
+    'visibility inside a component) and its layer name unless name is given; fills, strokes, effects and a flip ' +
+    'come from the component. textProperty copies the target\'s text (its ' +
     'own, or its first text layer\'s) into that TEXT property; a TEXT value no text layer shows is reported in ' +
     'warnings (TEXT_PROPERTY_UNBOUND / TEXT_PROPERTY_NOT_RENDERED). The target is deleted only after the instance ' +
     'is fully set up; any failure removes the instance and leaves the target as it was. A component or component ' +

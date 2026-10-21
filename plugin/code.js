@@ -5802,6 +5802,11 @@ async function applyInstanceProperties(instance, requested) {
   return { assignments: assignments, warnings: await checkTextPropertiesShown(instance, definitions, assignments) };
 }
 
+/** Text with \r\n and lone \r as \n, so a value and the layer showing it compare equal. */
+function normalizeLineEndings(text) {
+  return String(text).replace(/\r\n?/g, '\n');
+}
+
 /** The TEXT property a text layer's characters are bound to, or null. */
 function boundTextProperty(node) {
   try {
@@ -5836,9 +5841,7 @@ async function checkTextPropertiesShown(instance, definitions, assignments) {
   });
   if (textNames.length === 0) return [];
 
-  var texts = typeof instance.findAll === 'function'
-    ? instance.findAll(function(n) { return n.type === 'TEXT'; })
-    : [];
+  var texts = instance.findAll(function(n) { return n.type === 'TEXT'; });
   var where = describeVariant(await instance.getMainComponentAsync());
   var warnings = [];
   for (var i = 0; i < textNames.length; i++) {
@@ -5851,7 +5854,7 @@ async function checkTextPropertiesShown(instance, definitions, assignments) {
         'variant\'s text layer to the property in the component.');
       continue;
     }
-    var wrong = bound.filter(function(n) { return n.characters !== value; });
+    var wrong = bound.filter(function(n) { return normalizeLineEndings(n.characters) !== normalizeLineEndings(value); });
     if (wrong.length > 0) {
       warnings.push('TEXT_PROPERTY_NOT_RENDERED: "' + name + '" was set to ' + JSON.stringify(value) + ', but ' +
         wrong.map(function(n) {
@@ -5941,6 +5944,8 @@ function serializeInstanceCompact(instance) {
     y: instance.y,
     width: instance.width,
     height: instance.height,
+    rotation: instance.rotation,
+    opacity: instance.opacity,
     visible: instance.visible,
     locked: instance.locked
   };
@@ -6080,7 +6085,9 @@ function placeLike(instance, target, parent, matchSize) {
   var fillV = inAutoLayout && !absolute && target.layoutSizingVertical === 'FILL';
 
   if (inAutoLayout && absolute) instance.layoutPositioning = 'ABSOLUTE';
-  // Before x/y: rotation turns about the top-left, which x/y then place.
+  // Setting rotation keeps the node's x/y (its transform origin), so the order
+  // against x/y does not matter. A flip (negative scale in relativeTransform)
+  // is not carried.
   if ('rotation' in target && target.rotation) instance.rotation = target.rotation;
   if (!inAutoLayout || absolute) {
     instance.x = target.x;
@@ -6099,10 +6106,12 @@ var CARRIED_BOUND_FIELDS = ['visible', 'opacity'];
 
 /**
  * Give a replacement instance the target's layer state: its name (unless one
- * was given), opacity, visibility and lock, and any variable bound to
- * visible or opacity. Fills, strokes, effects and blend mode are the
- * component's look and are not carried; placement is placeLike's.
- * Lock is set last, so nothing after it is blocked.
+ * was given), opacity, visibility and lock, any variable bound to visible or
+ * opacity, and, for a target inside a component, a component property bound
+ * to its visibility (componentPropertyReferences.visible). Fills, strokes,
+ * effects and blend mode are the component's look and are not carried;
+ * placement is placeLike's. The Plugin API ignores locks, so the order of
+ * these writes does not matter.
  * @returns {Promise<string[]>} warnings for binds that could not be carried
  */
 async function carryLayerState(instance, target, name) {
@@ -6127,7 +6136,40 @@ async function carryLayerState(instance, target, name) {
     }
   }
 
+  warnings = warnings.concat(carryPropertyReferences(instance, target));
   if ('locked' in target) instance.locked = target.locked;
+  return warnings;
+}
+
+/**
+ * A target inside a component master can have its visibility bound to a
+ * BOOLEAN component property; the replacement takes that bind. A characters
+ * or mainComponent reference belongs to the target's own text or instance
+ * swap, which the replacement does not have, so it is reported, not carried.
+ * @returns {string[]} warnings
+ */
+function carryPropertyReferences(instance, target) {
+  var refs = null;
+  try {
+    refs = target.componentPropertyReferences;
+  } catch (_) {
+    refs = null;
+  }
+  if (!refs) return [];
+  var warnings = [];
+  if (refs.visible) {
+    try {
+      instance.componentPropertyReferences = { visible: refs.visible };
+    } catch (e) {
+      warnings.push('The target\'s visibility was bound to component property "' + refs.visible + '", which could ' +
+        'not be bound on the instance (' + thrownMessage(e) + '); rebind it in the component.');
+    }
+  }
+  var dropped = ['characters', 'mainComponent'].filter(function(field) { return refs[field]; });
+  for (var i = 0; i < dropped.length; i++) {
+    warnings.push('The target\'s ' + dropped[i] + ' was bound to component property "' + refs[dropped[i]] +
+      '"; the instance does not carry that binding. Rebind it in the component if it is still needed.');
+  }
   return warnings;
 }
 

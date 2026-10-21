@@ -11,9 +11,12 @@ Fixes from the first real run of the 0.6.0 library tools.
 - **`figma_replace_with_instance` keeps the target's layer state.** A hidden
   target came back as a visible instance. The instance now takes the
   target's visibility, lock, opacity and rotation, a variable bound to
-  `visible` or `opacity` (a bind that cannot be carried is a warning), and its
-  layer name unless `name` is given (it used to default to the component's
-  name). Fills, strokes, effects and blend mode stay the component's.
+  `visible` or `opacity` (a bind that cannot be carried is a warning), a
+  component property bound to its visibility when the target sits inside a
+  component (a bound text or instance-swap property is reported, not
+  carried), and its layer name unless `name` is given (it used to default to
+  the component's name). Fills, strokes, effects, blend mode and a flip stay
+  the component's.
 - **TEXT properties are checked on the canvas, not only in
   `componentProperties`.** A variant that defines a TEXT property without
   binding its text layer reads the value back while still showing its own
@@ -25,13 +28,13 @@ Fixes from the first real run of the 0.6.0 library tools.
   layer showing other text `TEXT_PROPERTY_NOT_RENDERED`. Warnings, not
   errors: the property is set, and the fix belongs in the component.
 
-### Changes
+### Behaviour changes
 
-- **Smaller responses.** `figma_create_instance` and
-  `figma_replace_with_instance` return a compact `node` (`id`, `name`, `type`,
-  `parentId`, `x`, `y`, `width`, `height`, `visible`, `locked`) beside
-  `mainComponent` and `componentProperties`, instead of the full ~40-property
-  node; `compact: false` returns the full node.
+- **`node` is now compact by default; pass `compact: false` for the previous
+  shape.** `figma_create_instance` and `figma_replace_with_instance` return
+  `node` as `id`, `name`, `type`, `parentId`, `x`, `y`, `width`, `height`,
+  `rotation`, `opacity`, `visible` and `locked`, beside `mainComponent` and
+  `componentProperties`, instead of the full ~40-property node.
 - **`figma_import_library_component` leaves the variant list out by default**
   (`includeVariants` now defaults to `false`). `componentPropertyDefinitions`
   already name every variant option, `defaultVariant` and `variantCount` stay,

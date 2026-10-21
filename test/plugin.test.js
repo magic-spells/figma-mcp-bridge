@@ -814,6 +814,8 @@ describe('create_instance', () => {
       y: 4,
       width: 80,
       height: 36,
+      rotation: 0,
+      opacity: 1,
       visible: true,
       locked: false
     });
@@ -952,6 +954,19 @@ describe('set_instance_properties', () => {
     assert.match(stale.warnings[0], /"Label" shows "Button"/);
   });
 
+  test('line endings do not count as a mismatch', async () => {
+    const { figma, set } = libraryFigma({}, { stale: ['Primary-default'] });
+    const instance = new FakeInstance(set.children[0]);
+    figma.currentPage.appendChild(instance);
+    instance.children[0].characters = 'Save\nnow';
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'set_instance_properties', {
+      instanceId: instance.id, properties: { Label: 'Save\r\nnow' }
+    });
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(result.warnings, undefined);
+  });
+
   test('only TEXT properties are checked against text layers', async () => {
     const { figma, set } = libraryFigma({}, { unbound: ['Primary-sm'] });
     const instance = new FakeInstance(set.children[0]);
@@ -1067,7 +1082,21 @@ describe('replace_with_instance', () => {
     assert.equal(result.node.name, 'Save button');
   });
 
-  test('a name given wins over the target\'s; variables bound to visible and opacity are carried', async () => {
+  test('a name given wins over the target\'s', async () => {
+    const { figma, set } = libraryFigma();
+    const card = new FakeFrame({ name: 'Card' });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', {
+      targetId: target.id, componentKey: set.key, name: 'Save'
+    });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    assert.equal(card.children[1].name, 'Save');
+  });
+
+  test('variables bound to visible and opacity are carried; one that is gone is a warning', async () => {
     const showSave = { id: 'VariableID:1:1', name: 'show-save' };
     const { figma, set } = libraryFigma({ variables: { [showSave.id]: showSave } });
     const card = new FakeFrame({ name: 'Card' });
@@ -1078,16 +1107,47 @@ describe('replace_with_instance', () => {
       opacity: { type: 'VARIABLE_ALIAS', id: 'VariableID:gone' }
     };
     loadPlugin(figma);
-    const result = await sendCommand(figma, 'replace_with_instance', {
-      targetId: target.id, componentKey: set.key, name: 'Save'
-    });
+    const result = await sendCommand(figma, 'replace_with_instance', { targetId: target.id, componentKey: set.key });
 
     assert.equal(result.success, true, JSON.stringify(result.error));
     const instance = card.children[1];
-    assert.equal(instance.name, 'Save');
     assert.deepEqual(instance.boundVariables, { visible: { type: 'VARIABLE_ALIAS', id: showSave.id } });
     assert.equal(result.warnings.length, 1);
     assert.match(result.warnings[0], /opacity.*VariableID:gone/);
+  });
+
+  test('inside a component, a visibility property bind is carried; a text bind is reported', async () => {
+    const { figma, set } = libraryFigma();
+    const card = new FakeComponent({ name: 'Card', key: 'key-card', remote: false });
+    figma.currentPage.appendChild(card);
+    const target = handMadeButton(card);
+    target.componentPropertyReferences = { visible: 'Show save#7:0', characters: 'Title#8:0' };
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', { targetId: target.id, componentKey: set.key });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    const instance = card.children[1];
+    assert.deepEqual({ ...instance.componentPropertyReferences }, { visible: 'Show save#7:0' });
+    assert.equal(result.warnings.length, 1);
+    assert.match(result.warnings[0], /characters was bound to component property "Title#8:0"/);
+  });
+
+  test('a hidden target inside auto-layout stays hidden and keeps FILL', async () => {
+    const { figma, set } = libraryFigma();
+    const form = new FakeFrame({ name: 'Form', width: 300, height: 200 });
+    form.layoutMode = 'VERTICAL';
+    figma.currentPage.appendChild(form);
+    const target = handMadeButton(form);
+    target.layoutSizingHorizontal = 'FILL';
+    target.visible = false;
+    loadPlugin(figma);
+    const result = await sendCommand(figma, 'replace_with_instance', { targetId: target.id, componentKey: set.key });
+
+    assert.equal(result.success, true, JSON.stringify(result.error));
+    const instance = form.children[1];
+    assert.equal(instance.visible, false);
+    assert.equal(instance.layoutSizingHorizontal, 'FILL');
+    assert.equal(result.node.visible, false);
   });
 
   test('the response is compact by default; compact: false returns the full node', async () => {
